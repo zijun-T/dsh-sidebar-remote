@@ -619,7 +619,17 @@ async function attachRemoteTerminal(ctx: Ctx, manager: RemotePtyManager, ws: Web
         try { handle.shell.setWindow(frame.rows, frame.cols) } catch {}
         return
       }
-      try { handle.shell.write(frame.text) } catch {}
+      try { handle.shell.write(frame.text) }
+      catch (e) {
+        // A throwing write means the SSH channel is gone even though no 'close'
+        // ever arrived (half-open TCP after a VPN drop or a server-side idle
+        // kill), so `handle.exited` is still false and nothing else would
+        // notice. Swallowing it left the pane frozen with zero diagnostics and
+        // the socket open, which the client reads as "still connected" and so
+        // never reconnects. Say what happened and drop the socket instead.
+        send(`\r\n[remote shell is gone: ${messageOf(e)}]\r\n`)
+        try { ws.close(1011, 'remote shell write failed') } catch {}
+      }
     })
     ws.on('close', () => {
       // Detach this view's own listeners instead of stacking a no-op on top of

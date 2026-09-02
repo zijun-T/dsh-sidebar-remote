@@ -283,11 +283,11 @@ drwxrwxr-x 2 remote remote 4096 Aug 24 17:29 diag1
 
 | 项 | 结果 |
 |---|---|
-| `npm pack` | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件** / ≈146 kB 压缩 / ≈499 kB 解包。以文件数为不变量、不钉精确字节数：`docs/` 在包内，改文档就会改包大小（实测一轮 doc 修订使 138.4 → 138.7 kB），追逐精确值是个收不敛的自指回归。两个规避手段：① 近似值对小幅文本增删不敏感，不会每改一次就过期；② 确需修正数字时做**等字节长替换**（如 `139`→`143`，三位换三位），文档大小不变，重打一次即达不动点 |
+| `npm pack` | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件** / ≈157 kB 压缩 / ≈523 kB 解包。以文件数为不变量、不钉精确字节数：`docs/` 在包内，改文档就会改包大小（实测一轮 doc 修订使 138.4 → 138.7 kB），追逐精确值是个收不敛的自指回归。两个规避手段：① 近似值对小幅文本增删不敏感，不会每改一次就过期；② 确需修正数字时做**等字节长替换**（如 `139`→`143`，三位换三位），文档大小不变，重打一次即达不动点 |
 | `prepack` | 确实执行了 `tsc` + `build-client.mjs`，构建日志打印烙进的兜底 home |
 | 清单完整性 | 含 `LICENSE`、`CHANGELOG.md`、`README.md`、`cordis.patch.yml`、`docs/`、`lib/`、`src/`、`scripts/`（含 `verify-live.mjs`）、`test/`、`tsconfig.json`；不含 `node_modules/`、`.npmrc`、`pnpm-lock.yaml`、`.gitignore`、`dist/*.tgz`、`*.map`、`tsconfig.tsbuildinfo` 与开发期探针脚本 |
-| 解包自足性 | 解包副本（仅 symlink 上游 peer）直跑 `node --test test/*.test.js` → **79 pass / 0 fail** |
-| 产物一致性 | tarball 内 17 个关键文件与工作区**逐字节一致**（`cmp -s` 全部 IDENTICAL）；tarball 内 `lib/client.js`（85406 bytes）与**线上服务返回的 bundle**（rev `634a6f831045`）逐字节一致 —— 故现运行的 profile 虽仍为 `link:`，它下发的就是发布产物本身 |
+| 解包自足性 | 解包副本（symlink **全部 7 个**上游 peer）直跑 `node --test test/*.test.js` → **80 pass / 11 suites / 0 fail**。peer 必须全挂：只挂 `dsh-better-sidebar` 一个时，7 个测试文件全因 `ERR_MODULE_NOT_FOUND: @dsh-ssh/dsh-ssh` 失败（见 §11.5 ②）|
+| 产物一致性 | tarball 内**全部 58 个文件**与工作区**逐字节一致**（`cmp -s` 逐个比对，**0 差异**）；tarball 内 `lib/client.js`（85814 bytes）与**线上服务返回的 bundle**（rev `a2e8d79c4349`）逐字节一致 —— 故现运行的 profile 虽仍为 `link:`，它下发的就是发布产物本身 |
 | 硬编码残留 | 产物中不存在"早退返回硬编码家目录"的形态：`grep -c 'return "<构建机家目录>"' lib/client.js` → **0**；`homedir()` 现为 `return true ? "<构建机家目录>" : "/"`（esbuild 把 `typeof` 守卫折叠成常量，无 define 时仍会保留为运行时守卫）。该字面量等于**构建时**的 `os.homedir()`，随构建机而变，故此处不写死具体路径 |
 
 ### 10.5 测试基座变化
@@ -306,3 +306,57 @@ drwxrwxr-x 2 remote remote 4096 Aug 24 17:29 diag1
 - **API body 必须带 `cwd`**：`sessionCwdOf()` 在有 override 时直接返回、不查注册表；缺了就查惰性注册表，用假 sessionId 必然 404。WS 路径不受此限，因为补丁会把 `cwd` 追加到改写后的 URL 上。
 - **pnpm 管理的 profile 里切勿跑 `npm install`**：`~/.dsh/profiles/web` 有 `node_modules/.pnpm` 与 `pnpm-lock.yaml`，npm 会重写为扁平布局并破坏 peer 隔离。统一用 `pnpm add` / `dsh plugin add`。
 - **`pnpm` 可能不在 PATH**：本机 `pnpm: command not found`（仅存 `/usr/lib/node_modules/corepack/shims/pnpm`）。故 `prepack`/`prepare`/`verify` 已改为直调 `tsc` 与 `node`，不绑定任何包管理器。
+- **`npm run verify:live` 裸跑必然 7/11，这不是产品缺陷**。`DSH_HOST_ID` / `DSH_REMOTE_PATH` / `DSH_EXPECT_ENTRY` 都有默认值，而入库的默认值是**脱敏后的合成值**（`11111111-2222-3333-4444-555555555555` / `/home/remote/ws` / `diag1`）。拿合成 host id 去打真实主机，依赖 SSH 的那 4 项断言必然失败，报 `host "11111111-…" not configured in dsh-ssh-hosts`；前 7 项（bundle 载入、polyfill、探测、路由改写）与主机无关，所以仍绿。本轮我又踩了一次，**是本类错误的第三次**（前两次见本节首条与 §9 的 `pty.close` 404）。正确调用见 `README.md`「真机端到端验证」，四个环境变量缺一不可。这是「默认值必须是合成值」的代价：脚本能安全入库，但每次跑都得显式传参 —— 文档里凡写 `npm run verify:live` → `11/11` 的地方，都省略了这一步。
+
+---
+
+## 11. 终端完全无法输入（仓库公开后）
+
+完整叙述与修复说明见 `delivery.md §8`；本节只留证据。
+
+### 11.1 判定方法
+
+关键是**分清服务端还是浏览器层**，否则很容易改错地方。两个排除动作：
+
+1. `npm run verify:live` → **11/11**，转写里 `pwd`→`/home/remote/ws`、`hostname`、`ls -l` 均有回显。该脚本第 158 行的 `type()` 就是 `ws.send(text)`，所以**输入方向在服务端已被证明是好的**。（**调用前提**：必须显式传 `DSH_HOST_ID` 等四个环境变量；裸跑用脱敏默认值只会得到 7/11，见 §10.6 末条。）
+2. 读上游 `dsh-better-sidebar/lib/index.js` 的 `attachTerminal`，逐项比对我们的 `attachRemoteTerminal`：`onExit` 只发文字不关 WS、`if (handle.exited) return` 静默丢弃输入 —— **两边一致**。所以“shell 退出后面板冻结”是上游既有契约，不得当缺陷改（否则偏离上游、并可能引入重连循环）。
+
+排除后只剩浏览器层。把**服务器实际下发的那一份 bundle** 放进 vm 沙箱，挂载 overlay，然后在沙箱内**逐字执行上游 `client-terminal.js:9217` 的守卫表达式**。
+
+### 11.2 实测数据
+
+| 观察点 | 修复前（rev `93a7fca5b2ef`） | 修复后（rev `a2e8d79c4349`） |
+|---|---|---|
+| overlay 挂载前 `WebSocket.OPEN` | `1` | `1` |
+| 挂载后 `CONNECTING` | **`undefined`** | `0` |
+| 挂载后 `OPEN` | **`undefined`** | `1` |
+| 挂载后 `CLOSING` | **`undefined`** | `2` |
+| 挂载后 `CLOSED` | **`undefined`** | `3` |
+| WS 是否连上远端终端 | 是（URL 正确重写） | 是 |
+| `socket.readyState` | `1`（OPEN） | `1`（OPEN） |
+| 上游守卫 `readyState === WebSocket.OPEN` | **false** | **true** |
+| 实际发出的按键数 | **0** | **1** |
+
+注意修复前那一行：连接是好的、`readyState` 是 1、URL 重写也对 —— **只有发送侧死了**。这就是为何“地址显示正常但打不进字”，也是为何所有路由测试全绿。
+
+### 11.3 测试基座变化
+
+`79 tests / 11 suites` → **`80 tests / 11 suites`**，新增 1 项（`test/browser-bundle.test.js`）：断言打过补丁的构造函数仍暴露四个静态常量、`prototype` 不变，并以上游原句守卫实际发出一个按键、断言它到达 socket。
+
+脚手架修正（这才是漏网真因）：原 stub 是普通函数、只设 `WebSocket.OPEN = 1`（四个常量只设一个）、`send` 是空函数。现改为 `class`（浏览器 `WebSocket` 本就不可 `[[Call]]`）、四常量齐备、`send()` 记录到 `wsSends`。
+
+**该测试已验证会失败**：将 `src/client/index.ts` 退回修复前版本重建（旧 bundle 85406 bytes、`grep -c 'new Proxy'` = 0），得到 `not ok 1 - patched WebSocket lost the static CONNECTING`；还原后 bundle 与备份 IDENTICAL。
+
+### 11.4 附带修正的错误认知
+
+排查中一度以为“注释不进产物”，因为六个注释探针在 bundle 里全搜不到、而文件末尾追加一行独特 token 后字节数不变。实测推翻：**esbuild 未压缩，依附于对象字面量属性的注释会原文进产物**（依附于语句的会丢），所以注释文本会影响字节数 —— 同一代码、仅改一处属性注释：85617 ↔ 85814。教训：探针选在会被丢弃的位置，就会得出错误结论；要验就用**多种位置**的探针，或直接去看产物原文。
+
+### 11.5 本轮我自己引入、又自行发现并修掉的两处错误
+
+记在此处，因为两处都不会报错，只能靠主动核验发现。
+
+**① 把真机转写原样粘进文档，重新引入了已脱敏的 PII。** 写 §11.1 与 `delivery.md` §8.1 时，我把 `verify:live` 的终端转写直接抄了进去，其中含真实远端家目录 `/home/<真实用户名>/<真实目录>`。而 §7 的公开前脱敏恰恰把这类路径统一替换成了 `/home/remote`；同一份 `delivery.md` 的历史 §6.3 用的就是脱敏值 —— 新旧两节并排，我写的那节是**唯一**的泄漏点。发现途径是提交前对全部入库文件跑 `git grep -I -n -E '<真实用户名>|<内网段>|<真实 host UUID>'`，命中 2 处（`delivery.md:169`、`verification.md:320`）；两处均在本次会话新增、**尚未提交**，所以公开仓库里从未出现过。已用等字节长替换改回脱敏约定（两串同为 15 字节，文档大小不变），重扫 **0 命中**。
+
+> 教训：**脱敏不是一次性动作**。任何在脱敏之后新增的文档，只要粘贴了真机输出，就可能把已移除的信息带回来。所以「粘真机输出进文档」之后必须重跑一遍敏感模式扫描，而不能只在公开前跑一次。
+
+**② 解包自足性审计一度报 7 fail，是我的审计脚手架漏挂 peer。** `package.json` 声明 7 个 `peerDependencies`，而我只 symlink 了 `dsh-better-sidebar` 一个，于是 7 个测试文件全因 `ERR_MODULE_NOT_FOUND: Cannot find package '@dsh-ssh/dsh-ssh'` 失败（且 `node --test` 只报出 `22 tests / 0 suites`，因为失败发生在文件顶层 import，用例根本没注册）。补齐全部 7 个 peer 后 → **80 pass / 11 suites / 0 fail**。**这不是打包缺陷** —— 缺的是 peer，而 peer 按定义就不该由本包提供。教训：解包审计失败时，先确认失败是 `ERR_MODULE_NOT_FOUND` 且缺的是 peer，再去怀疑产物；把审计脚手架的错误当成产品缺陷去修，会修坏本来正确的东西。

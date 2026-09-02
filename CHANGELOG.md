@@ -117,6 +117,39 @@ the Node and browser halves, or between this package and the *other* copy of
   `/sidebar/remote/file` and the git endpoint. The session registry is populated
   lazily, so a probe fired before hydration 404'd even though the caller already
   knew the cwd.
+- **The terminal accepted no keyboard input at all.** The pane connected, rendered
+  live remote output and showed the correct remote cwd, yet not one keystroke ever
+  left the browser. The client overlay replaced `globalThis.WebSocket` with a
+  wrapper function that copied `prototype` but not the static
+  `CONNECTING`/`OPEN`/`CLOSING`/`CLOSED`. `dsh-better-sidebar` gates *every* send
+  on `socket.readyState === WebSocket.OPEN` — in its `term.onData` subscription,
+  and identically for the `resize`/`close`/`park` control frames — so with
+  `WebSocket.OPEN` reading `undefined` the comparison was permanently false and
+  `socket.send()` was unreachable. Two things hid it: receiving never consults the
+  constant, so output looked perfectly healthy; and the routing tests only ever
+  asserted on the rewritten *URL*, which still worked. The replacement is now a
+  `Proxy`, which forwards every static (and `prototype`), so nothing else on the
+  constructor can silently go missing the same way. Note this is a second,
+  independent keystroke defect — the `host`-layer row in the table above was the
+  server misreading the wire protocol; this one was the client never putting
+  anything on the wire. Suppressing `close`/`park` also meant host-side pty
+  handles were never released, so the same change fixes that leak.
+- **A dead SSH channel froze the pane with no diagnostic.** `shell.write()`
+  failures were swallowed by an empty `catch`. When the channel dies without
+  emitting `close` — half-open TCP after a VPN drop or a server-side idle kill —
+  `handle.exited` stays `false`, the socket stays open, and every keystroke
+  vanished silently. The client reads an open socket as healthy and so never
+  reconnects, which presents exactly like the bug above. The failure is now
+  reported into the pane and the socket closed with `1011`.
+
+The suite is now 80 tests / 11 suites. The added one asserts that the patched
+constructor still exposes all four state constants *and* that a keystroke really
+reaches the socket through better-sidebar's own guard expression; it was verified
+to fail against the pre-fix bundle (`patched WebSocket lost the static
+CONNECTING`), so it is a regression test rather than a tautology. The WebSocket
+stub in `test/browser-bundle.test.js` is now a `class` carrying all four
+constants — it used to be a plain function with only `OPEN`, which is part of why
+nothing caught this.
 
 ## 0.1.0 - unreleased
 

@@ -78,7 +78,7 @@ DSH_BUILD_HOME=/home/alice npm run build
 ```
 npm install          # 或 pnpm install --frozen-lockfile
 npm run typecheck
-npm test             # 79 tests / 11 suites，无需网络与远端主机
+npm test             # 80 tests / 11 suites，无需网络与远端主机
 npm run build
 npm pack --dry-run
 ```

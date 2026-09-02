@@ -284,30 +284,52 @@ function installFetchPatch(ctx: unknown, logger?: { info(s:string):void; warn(s:
   let didPatchWS = false
   if (origWS) {
     const OrigWS = origWS as unknown as new (url: string | URL, protos?: string | string[])=>WebSocket
-    const PatchedWS = function (this: unknown, url: string | URL, protos?: string | string[]) {
-      try {
-        const s = String(url)
-        let u: URL
-        try { u = new URL(s, typeof location !== 'undefined' ? location.href : 'http://127.0.0.1:3080/') } catch { return new (OrigWS as unknown as new (a:unknown,b:unknown)=>unknown)(url as unknown, protos as unknown) as unknown as WebSocket }
-        if (typeof location !== 'undefined' && u.host !== location.host) return new (OrigWS as unknown as new (a:unknown,b:unknown)=>unknown)(url as unknown, protos as unknown) as unknown as WebSocket
-        // Only terminal WS
-        if (u.pathname === '/sidebar/ws/terminal' || u.pathname === '/sidebar/ws/agent-terminals') {
-          const sid = u.searchParams.get('sessionId') ?? u.searchParams.get('session') ?? undefined
-          // Sessions first, then the cwd query param the caller supplied.
-          const cwd = cwdOfSessionId(ctx, sid) ?? cwdFromRequest(u, null)
-          if (cwd && routeOf(cwd).kind === 'remote' && u.pathname === '/sidebar/ws/terminal') {
-            const next = new URL(u.toString())
-            next.pathname = '/sidebar/ws/remote-terminal'
-            // Pass cwd so host can verify route without re-reading header (host prefers header but supports query)
-            if (!next.searchParams.has('cwd') && cwd) next.searchParams.set('cwd', cwd)
-            return new (OrigWS as unknown as new (a:unknown,b:unknown)=>unknown)(next.toString(), protos as unknown) as unknown as WebSocket
-          }
-        }
-      } catch {}
-      return new (OrigWS as unknown as new (a:unknown,b:unknown)=>unknown)(url as unknown, protos as unknown) as unknown as WebSocket
-    } as unknown as typeof WebSocket
-    // Keep prototype so instanceof checks still work roughly
-    try { (PatchedWS as unknown as Record<string, unknown>).prototype = (OrigWS as unknown as Record<string, unknown>).prototype } catch {}
+    // Returns the URL to construct instead, or null to leave the call alone.
+    const rewriteTerminalWsUrl = (url: string | URL): string | null => {
+      const s = String(url)
+      let u: URL
+      try { u = new URL(s, typeof location !== 'undefined' ? location.href : 'http://127.0.0.1:3080/') } catch { return null }
+      // Ignore cross-origin
+      if (typeof location !== 'undefined' && u.host !== location.host) return null
+      // Only the UI-tab terminal. '/sidebar/ws/agent-terminals' used to be
+      // listed alongside it but never matched the rewrite condition below, so
+      // it fell through unchanged — dropping it here is behaviour-preserving.
+      if (u.pathname !== '/sidebar/ws/terminal') return null
+      const sid = u.searchParams.get('sessionId') ?? u.searchParams.get('session') ?? undefined
+      // Sessions first, then the cwd query param the caller supplied.
+      const cwd = cwdOfSessionId(ctx, sid) ?? cwdFromRequest(u, null)
+      if (!cwd || routeOf(cwd).kind !== 'remote') return null
+      const next = new URL(u.toString())
+      next.pathname = '/sidebar/ws/remote-terminal'
+      // Pass cwd so host can verify route without re-reading header (host prefers header but supports query)
+      if (!next.searchParams.has('cwd')) next.searchParams.set('cwd', cwd)
+      return next.toString()
+    }
+    const openWs = (url: string | URL, protos?: string | string[]): WebSocket => {
+      let target: string | URL = url
+      // Routing is best-effort: a failure here must not block the socket.
+      try { const rewritten = rewriteTerminalWsUrl(url); if (rewritten) target = rewritten } catch {}
+      return new OrigWS(target, protos)
+    }
+    // A Proxy rather than a wrapper function, because the wrapper copied
+    // `prototype` but NOT WebSocket's static CONNECTING/OPEN/CLOSING/CLOSED.
+    // better-sidebar gates *every* keystroke on
+    //   if (socket !== null && socket.readyState === WebSocket.OPEN) socket.send(data)
+    // in its `term.onData` subscription, and gates resize/close/park the same
+    // way. With those statics undefined the comparison was permanently false,
+    // so a remote pane rendered output and the correct cwd yet never sent a
+    // single character — and never released its host-side pty handle either.
+    // A Proxy forwards all statics (and `prototype`), so nothing else on the
+    // constructor can silently go missing the same way.
+    const PatchedWS = new Proxy(OrigWS as unknown as object, {
+      construct: (_t, args) => openWs(args[0] as string | URL, args[1] as string | string[] | undefined) as object,
+      // A browser's WebSocket is not [[Call]]able, so this trap is normally
+      // unreachable. It is here for the case where the global we captured was
+      // already some other patch's plain function: without the trap the proxy
+      // would be callable and forward the *unrewritten* arguments, silently
+      // bypassing our own routing.
+      apply: (_t, _thisArg, args) => openWs(args[0] as string | URL, args[1] as string | string[] | undefined) as object,
+    })
     try { (g as unknown as Record<string, unknown>).WebSocket = PatchedWS as unknown } catch {}
     didPatchWS = true
   }

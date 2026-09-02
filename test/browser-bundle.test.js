@@ -44,6 +44,7 @@ function loadBundle(opts = {}) {
   const fetchCalls = []
   const probeCalls = []
   const wsCalls = []
+  const wsSends = []
 
   // What GET /sidebar/remote/root answers. The default is "no usable root",
   // i.e. what a host too old to serve the endpoint returns; routing then has to
@@ -86,15 +87,29 @@ function loadBundle(opts = {}) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
     },
   }
-  // A WebSocket stub that records the URL it was constructed with.
-  sandbox.WebSocket = function FakeWebSocket(url, protos) {
-    wsCalls.push({ url: String(url), protos })
-    this.readyState = 1
-    this.close = () => {}
-    this.send = () => {}
-    this.on = () => {}
+  // A WebSocket stub that records the URL it was constructed with and every
+  // send() that reaches it. Declared as a class on purpose: a browser's
+  // WebSocket is [[Construct]]-only, and a plain-function stub would let the
+  // bundle get away with calls the real constructor rejects.
+  sandbox.WebSocket = class FakeWebSocket {
+    constructor(url, protos) {
+      wsCalls.push({ url: String(url), protos })
+      this.readyState = 1
+      this.close = () => {}
+      this.send = (data) => { wsSends.push(String(data)) }
+      this.on = () => {}
+    }
   }
+  // The state constants a real WebSocket carries on the *constructor*. Setting
+  // only OPEN, as this stub once did, hides the bug the next test pins: the
+  // bundle replaces globalThis.WebSocket, and better-sidebar gates every
+  // keystroke on `socket.readyState === WebSocket.OPEN`. A replacement that
+  // loses the statics makes that comparison permanently false — the terminal
+  // renders output and the correct cwd, but the keyboard is dead.
+  sandbox.WebSocket.CONNECTING = 0
   sandbox.WebSocket.OPEN = 1
+  sandbox.WebSocket.CLOSING = 2
+  sandbox.WebSocket.CLOSED = 3
 
   // `window`/`self`/`globalThis` all point at the sandbox global, matching a
   // browser where they are the same object.
@@ -122,7 +137,7 @@ function loadBundle(opts = {}) {
     throw new Error('client bundle must not require() external modules')
   })
 
-  return { exports, sandbox, fetchCalls, probeCalls, wsCalls }
+  return { exports, sandbox, fetchCalls, probeCalls, wsCalls, wsSends }
 }
 
 test('bundle registers via __ModuleLoader__ and exports apply/inject', () => {
@@ -181,6 +196,45 @@ test('apply() patches fetch and WebSocket, dispose() unwinds them', () => {
   // function is gone and WebSocket is the original constructor again.
   assert.notEqual(sandbox.fetch, patchedFetch, 'dispose did not restore fetch')
   assert.equal(sandbox.WebSocket, origWS, 'dispose did not restore WebSocket')
+})
+
+test('patched WebSocket keeps the static state constants, so keystrokes still send', () => {
+  const { exports, sandbox, wsCalls, wsSends } = loadBundle()
+  const orig = sandbox.WebSocket
+  exports.apply(makeCtx(sandbox, REMOTE_CWD))
+  const patched = sandbox.WebSocket
+  assert.notEqual(patched, orig, 'the bundle must have replaced the global')
+
+  // The replacement used to be a wrapper function that copied `prototype` but
+  // not CONNECTING/OPEN/CLOSING/CLOSED, so all four read back undefined. No
+  // routing test could see it: the URL rewrite still worked and output still
+  // rendered. What broke was the sending side, including the resize/close/park
+  // control frames — so host-side pty handles also leaked.
+  for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
+    assert.equal(patched[k], orig[k], `patched WebSocket lost the static ${k}`)
+  }
+  assert.equal(patched.prototype, orig.prototype, 'instanceof must keep working')
+
+  // better-sidebar client-terminal.js, verbatim — the only path a keystroke has:
+  //   const inputSub = term.onData((data) => {
+  //     if (socket !== null && socket.readyState === WebSocket.OPEN) socket.send(data)
+  //   })
+  const socket = new patched(
+    `ws://127.0.0.1:3080/sidebar/ws/terminal?sessionId=session-remote&tab=terminal%3A1`,
+  )
+  assert.equal(wsCalls.length, 1)
+  assert.equal(
+    new URL(wsCalls[0].url, ORIGIN).pathname,
+    '/sidebar/ws/remote-terminal',
+    'routing must still work through the proxy',
+  )
+  assert.equal(
+    socket.readyState,
+    sandbox.WebSocket.OPEN,
+    'the upstream guard must hold on an open socket',
+  )
+  if (socket !== null && socket.readyState === sandbox.WebSocket.OPEN) socket.send('pwd\r')
+  assert.deepEqual(wsSends, ['pwd\r'], 'a keystroke must actually reach the socket')
 })
 
 test('remote session: /sidebar/api/* is rewritten to /sidebar/remote/api/*', async () => {
