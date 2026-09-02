@@ -78,9 +78,9 @@ dsh plugin --profile web remove dsh-sidebar-remote
 - [x] tarball 解包审计：解包副本直跑 `79 pass / 0 fail`
 - [x] 真机端到端：`npm run verify:live` → `11/11`（改名后重跑）
 
-**仍需你完成（我无法代你做，也不会编造）：**
+**发布与部署事项（我无法代做的部分；第 1 项已完成，留此作记录）：**
 
-- [ ] **在 GitHub 上创建 `zijun-T/dsh-sidebar-remote` 仓库并推送代码**。`repository`/`homepage`/`bugs` 已按 npm 惯例（仓库名 == 包名）指向该地址，但 `git ls-remote` 实测 **`ERROR: Repository not found.`** —— 仓库尚未创建，所以这三个 URL 目前是**前向引用**，建好前会 404。**git 无法创建远端仓库**（GitHub 不支持 push-to-create），必须先在网页 `github.com/new` 建好，或走 REST API / `gh` CLI。若你想用别的仓库名，改 `package.json` 这三个字段即可，无其他联动
+- [x] **在 GitHub 上创建 `zijun-T/dsh-sidebar-remote` 仓库并推送代码** —— 已完成。仓库为 public、从空仓起步（未勾 README / .gitignore / license，所以首推无冲突）；首提交 `9fc04ed3` 推上 40 个文件，远端 `refs/heads/main` 与本地 hash 逐字符一致，SSH 与 HTTPS 两种协议均实测可拉到同一 commit。`repository` / `homepage` / `bugs` 三个 URL 因此**不再是前向引用**，已实测可达。遗留知识点：**git 无法创建远端仓库**（GitHub 不支持 push-to-create，这点与 GitLab / Gitea 不同），`git push` 到不存在的仓库只会得到 `ERROR: Repository not found.`；必须先在网页 `github.com/new` 建好，或走 REST API / `gh` CLI
 - [ ] **`npm publish`**。需你的 npm 账号登录，我不会代你发布。发布前建议先 `npm publish --dry-run`（清单与 `npm pack` 等价）
 - [ ] （可选）**是否把 profile 从 `link:` 换成 tarball 安装**。现运行 profile 仍为 `"dsh-sidebar-remote": "link:<本地插件目录绝对路径>"` —— 改名后我**保留了 `link:`**，因为你目前的工作流依赖它实时生效；已用等价证据代替（tarball 内 `lib/client.js` 与线上服务下发的 bundle 逐字节一致）。确需切换时（把 `<repo>` 换成你的克隆路径）：
   ```bash
