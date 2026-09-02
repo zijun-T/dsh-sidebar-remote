@@ -1,0 +1,18 @@
+# remote-sidebar-plugin — patch layer
+# `name` is the npm package to resolve and must match package.json#name exactly;
+# `id` is this patch entry's own alias in the bundle graph and is deliberately
+# independent of the package name (it stayed `remote-sidebar` across the 0.2.0
+# rename from `@remote/sidebar-remote` to `dsh-sidebar-remote`).
+# Upstream plugins (better-sidebar, @dsh-ssh/dsh-ssh) are typically already
+# installed as direct profile dependencies. Only insert the aggregator itself.
+# If deploying to a profile WITHOUT the upstream deps, add them back:
+#   - insert:
+#       - id: better-sidebar
+#         name: 'dsh-better-sidebar'
+#       - id: '@dsh-ssh/dsh-ssh'
+#         name: '@dsh-ssh/dsh-ssh'
+#         config:
+#           maxConnections: 4
+- insert:
+    - id: remote-sidebar
+      name: 'dsh-sidebar-remote'
