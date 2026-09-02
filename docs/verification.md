@@ -283,7 +283,7 @@ drwxrwxr-x 2 remote remote 4096 Aug 24 17:29 diag1
 
 | 项 | 结果 |
 |---|---|
-| `npm pack` | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件** / ≈146 kB 压缩 / ≈498 kB 解包。以文件数为不变量、不钉精确字节数：`docs/` 在包内，改文档就会改包大小（实测一轮 doc 修订使 138.4 → 138.7 kB），追逐精确值是个收不敛的自指回归。两个规避手段：① 近似值对小幅文本增删不敏感，不会每改一次就过期；② 确需修正数字时做**等字节长替换**（如 `139`→`143`，三位换三位），文档大小不变，重打一次即达不动点 |
+| `npm pack` | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件** / ≈146 kB 压缩 / ≈499 kB 解包。以文件数为不变量、不钉精确字节数：`docs/` 在包内，改文档就会改包大小（实测一轮 doc 修订使 138.4 → 138.7 kB），追逐精确值是个收不敛的自指回归。两个规避手段：① 近似值对小幅文本增删不敏感，不会每改一次就过期；② 确需修正数字时做**等字节长替换**（如 `139`→`143`，三位换三位），文档大小不变，重打一次即达不动点 |
 | `prepack` | 确实执行了 `tsc` + `build-client.mjs`，构建日志打印烙进的兜底 home |
 | 清单完整性 | 含 `LICENSE`、`CHANGELOG.md`、`README.md`、`cordis.patch.yml`、`docs/`、`lib/`、`src/`、`scripts/`（含 `verify-live.mjs`）、`test/`、`tsconfig.json`；不含 `node_modules/`、`.npmrc`、`pnpm-lock.yaml`、`.gitignore`、`dist/*.tgz`、`*.map`、`tsconfig.tsbuildinfo` 与开发期探针脚本 |
 | 解包自足性 | 解包副本（仅 symlink 上游 peer）直跑 `node --test test/*.test.js` → **79 pass / 0 fail** |

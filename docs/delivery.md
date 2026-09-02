@@ -22,7 +22,7 @@
 | `tsc -p tsconfig.json` | 0 | 0 errors |
 | `node --test test/*.test.js` | 0 | `79 pass / 11 suites / ~110ms` |
 | `npm run build` | 0 | `lib/client.js` 85406 bytes（改名前 85410，恰好 −4 = `@remote/sidebar-remote` 22 字符 → `dsh-sidebar-remote` 18 字符，反证改动面只有 id 字符串）；构建日志打印烙进的兜底 home |
-| `npm pack --pack-destination dist` | 0 | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件**（稳定不变量）/ ≈146 kB 压缩 / ≈498 kB 解包；`prepack` 自动重建 `lib/`。不钉精确字节数：`docs/` 本身在包内，改文档就会改包大小，追逐精确值是个收不敛的自指回归 |
+| `npm pack --pack-destination dist` | 0 | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件**（稳定不变量）/ ≈146 kB 压缩 / ≈499 kB 解包；`prepack` 自动重建 `lib/`。不钉精确字节数：`docs/` 本身在包内，改文档就会改包大小，追逐精确值是个收不敛的自指回归 |
 | 解包审计 | 0 | 解包副本（仅 symlink 上游 peer）直跑 `node --test test/*.test.js` → `79 pass / 0 fail`，证明打包产物自足 |
 | 产物一致性 | 0 | tarball 内关键文件与工作区**逐字节一致**；tarball 内 `lib/client.js` 与**线上服务返回的 bundle**（rev `634a6f831045`，85406 bytes）逐字节一致 |
 | `npm run verify:live` | 0 | `11/11 checks passed`（改名后重跑，真机 SSH，详见 `verification.md §10`） |
