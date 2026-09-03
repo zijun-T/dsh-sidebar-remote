@@ -89,6 +89,20 @@ export function displayAddress(cwd: string, hosts: Record<string, { name?: strin
   return cwd
 }
 
+// Basename of a remote path: the label a workspace row shows instead of the
+// base64url placeholder segment. A verbatim mirror of @dsh-ssh/dsh-ssh's
+// placeholderDisplayName() — that module cannot be imported here because it
+// does `import fs from 'node:fs'` at top level, which esbuild would drag into
+// the browser bundle. Upstream documents the very trap this exists for: "The
+// placeholder directory name is a base64-encoded segment (e.g. L2hvbWUv...),
+// so we derive the title from the real remote path instead."
+export function remoteDisplayName(remotePath: string): string {
+  const text = typeof remotePath === 'string' ? remotePath : ''
+  const parts = text.split('/')
+  while (parts.length > 1 && parts[parts.length - 1] === '') parts.pop() // drop trailing slashes
+  return parts.length > 1 ? parts[parts.length - 1] : 'root'
+}
+
 /** Structured remote identity — never derived by parsing displayAddress. */
 export interface RemoteIdentity {
   hostId: string

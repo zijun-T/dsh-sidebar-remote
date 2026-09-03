@@ -78,7 +78,7 @@ DSH_BUILD_HOME=/home/alice npm run build
 ```
 npm install          # 或 pnpm install --frozen-lockfile
 npm run typecheck
-npm test             # 80 tests / 11 suites，无需网络与远端主机
+npm test             # 102 tests / 14 suites，无需网络与远端主机
 npm run build
 npm pack --dry-run
 ```
@@ -91,7 +91,8 @@ npm pack --dry-run
 
 ```bash
 npm run verify:live
-# 换到别的部署时只需换环境变量，不需改脚本：
+# 四个环境变量缺一不可：入库默认值是脱敏后的合成值，裸跑只有 10/14（依赖 SSH 的 4 项会以
+# host "11111111-…" not configured 失败 —— 那是调用错误，不是产品缺陷）。
 DSH_ORIGIN=http://127.0.0.1:3080 \
 DSH_HOST_ID=<settings.yaml 里的主机 id> \
 DSH_REMOTE_PATH=/path/on/remote \
@@ -99,7 +100,7 @@ DSH_EXPECT_ENTRY=<该目录下必然存在的名字> \
   npm run verify:live
 ```
 
-它覆盖 11 项断言：bundle 可载入、base64url polyfill 生效、`/sidebar/remote/root` 存在且客户端探测一次并采纳其值、`/sidebar/api/*` 被改写为 `/sidebar/remote/api/*`、文件树返回真实远端内容、终端 WS 改写到 `/sidebar/ws/remote-terminal`、`pwd` 为远端真实路径、无 1011 异常关闭、无 warn 降级。
+它覆盖 14 项断言：bundle 可载入、base64url polyfill 生效、`/sidebar/remote/root` 存在且客户端探测一次并采纳其值、`/sidebar/api/*` 被改写为 `/sidebar/remote/api/*`、文件树返回真实远端内容、**Files 面板根行显示真实目录名而非 base64url 尾巴**、**子行仍是 `fs.tree` 返回的真名**、**重渲染后 observer 会再改回来**、终端 WS 改写到 `/sidebar/ws/remote-terminal`、`pwd` 为远端真实路径、无 1011 异常关闭、无 warn 降级。
 
 判定基准不可伪造：本地占位目录是空的，`DSH_EXPECT_ENTRY` 只可能来自远端。
 

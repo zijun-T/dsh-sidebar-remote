@@ -91,6 +91,58 @@ sandbox.window = sandbox
 sandbox.self = sandbox
 sandbox.globalThis = sandbox
 
+// A DOM stub shaped like better-sidebar's Files panel. The root row is the one
+// place better-sidebar captions from the cwd itself:
+//     const root = cwd;            // client-registry.js:11993
+//     children: baseName$1(root)   // client-registry.js:12114
+// With a placeholder cwd that renders the base64url tail. The workspace row, the
+// breadcrumb and the shell prompt all showed the real folder name, which is
+// exactly why this went unnoticed for so long.
+//
+// Only the surface the fix touches is implemented, and querySelectorAll mirrors
+// document order (depth-first) — that is what makes "the first explorerRow in a
+// body is the root row" true here as it is in a browser.
+function stubEl(className, textContent = '', children = []) {
+  return {
+    className,
+    textContent,
+    children,
+    attrs: {},
+    setAttribute(name, value) { this.attrs[name] = value },
+    getAttribute(name) { return this.attrs[name] ?? null },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null },
+    querySelectorAll(sel) {
+      const want = /^\[class\*="([^"]+)"\]$/.exec(sel)?.[1]
+      if (!want) throw new Error(`stub only supports [class*="…"], got ${sel}`)
+      const out = []
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (String(c.className).includes(want)) out.push(c)
+          walk(c)
+        }
+      }
+      walk(this)
+      return out
+    },
+  }
+}
+const ENCODED_TAIL = encodeRemotePath(REMOTE_PATH)
+// Derived independently of the plugin's own helper, so this also cross-checks it.
+const EXPECTED_LABEL = REMOTE_PATH.split('/').filter(Boolean).pop() || 'root'
+const rootLabel = stubEl('nArs4W_explorerName', ENCODED_TAIL)
+const rootRow = stubEl('nArs4W_explorerRow', '', [stubEl('svg'), rootLabel, stubEl('nArs4W_explorerRef')])
+const childLabel = stubEl('nArs4W_explorerName', EXPECT_ENTRY)
+const childRow = stubEl('nArs4W_explorerRow', '', [stubEl('svg'), childLabel])
+const explorerBody = stubEl('nArs4W_explorerBody', '', [rootRow, childRow])
+const domRoot = stubEl('#document', '', [explorerBody])
+sandbox.document = { body: domRoot, querySelectorAll: (sel) => domRoot.querySelectorAll(sel) }
+let observerCb = null
+sandbox.MutationObserver = class {
+  constructor(cb) { observerCb = cb; this.disconnected = 0 }
+  observe() {}
+  disconnect() { this.disconnected++ }
+}
+
 const context = vm.createContext(sandbox)
 if (typeof sandbox.Buffer !== 'undefined') fatal('Node Buffer leaked into the sandbox; the polyfill would go untested')
 vm.runInContext(code, context, { filename: 'client.js' })
@@ -136,6 +188,24 @@ check('a local-shaped /sidebar/api call was rewritten to /sidebar/remote/api',
 check(`file tree returned real remote content ("${EXPECT_ENTRY}")`,
   treeRes.status === 200 && treeBody.includes(`"name":"${EXPECT_ENTRY}"`),
   `HTTP ${treeRes.status} ${treeBody.slice(0, 300)}`)
+
+// --- 6b. Files-panel root label ----------------------------------------------
+check(`Files-panel root row reads "${EXPECTED_LABEL}", not the base64url tail`,
+  rootLabel.textContent === EXPECTED_LABEL && rootRow.getAttribute('title') === REMOTE_PATH,
+  `label=${JSON.stringify(rootLabel.textContent)} title=${JSON.stringify(rootRow.getAttribute('title'))} (encoded tail was ${ENCODED_TAIL})`)
+check('child rows keep the real remote names fs.tree returned',
+  childLabel.textContent === EXPECT_ENTRY, `label=${JSON.stringify(childLabel.textContent)}`)
+
+// React owns that caption, so a session switch or tree reload puts the encoded
+// tail straight back. The observer has to undo it again — that is the difference
+// between a fix and a one-shot repaint.
+rootLabel.textContent = ENCODED_TAIL
+rootRow.attrs = {}
+if (observerCb) observerCb()
+await new Promise((r) => setTimeout(r, 400))
+check('a re-render is relabelled again by the observer',
+  rootLabel.textContent === EXPECTED_LABEL && rootRow.getAttribute('title') === REMOTE_PATH,
+  `label=${JSON.stringify(rootLabel.textContent)} title=${JSON.stringify(rootRow.getAttribute('title'))}`)
 
 // --- 7. terminal over real SSH -----------------------------------------------
 const ws = new sandbox.WebSocket(

@@ -46,7 +46,7 @@ value hardcoded into the browser shim.
   no-op, and leaving it in would imply the package is still scoped.
 - 13 tests: cross-`HOME` placeholder detection, probe sequencing, the
   authoritative root suppressing the fallback, WebSocket routing while the probe
-  is still in flight, and 404 degradation. Suite is now 79 tests / 11 suites.
+  is still in flight, and 404 degradation. Suite went from 66 / 10 to 79 / 11.
 
 ### Changed
 
@@ -134,6 +134,31 @@ the Node and browser halves, or between this package and the *other* copy of
   server misreading the wire protocol; this one was the client never putting
   anything on the wire. Suppressing `close`/`park` also meant host-side pty
   handles were never released, so the same change fixes that leak.
+- **The Files panel captioned its root row with base64url.** A remote workspace's
+  tree listed the right files under a header reading `L2hvbWUvcmVtb3RlL3dz`,
+  while the workspace row, the breadcrumb and the shell prompt all said `ws`.
+  `dsh-better-sidebar` derives that one caption locally — `const root = cwd`
+  (`client-registry.js:11993`) then `baseName$1(root)` (`:12114`) — and a remote
+  session's `cwd` is the *placeholder* path `<root>/<hostId>/<base64url>`, so
+  `basename()` yields the encoded segment. The contents were never wrong: they
+  come from `fs.tree`, which returns real remote paths. Nothing on the wire can
+  fix it. No client code reads the `root` label the host's own `session.cwd`
+  handler returns (checked in both 0.17.1 and 0.18.0-alpha.0), and `cwd` itself
+  must stay the placeholder because every routing decision keys on it.
+  `@dsh-ssh/dsh-ssh` documents this exact trap and ships `placeholderDisplayName()`
+  for it, but `FileTree` never calls it — and that helper cannot simply be
+  imported, because its module does `import fs from 'node:fs'` at top level,
+  which esbuild would hand to the browser as an unsatisfiable `require()`.
+  The overlay now corrects the rendered caption: a mirror of that helper in
+  `shared/router.ts` (`remoteDisplayName`) plus a `MutationObserver`, because
+  React owns the text and restores the encoded caption on every re-render.
+  Two deliberate constraints. The label is derived from `routeOf()`, *not* from
+  "does this text decode" — a local folder whose name happens to be canonical
+  base64url (`L2E` → `/a`) must not be relabelled, so the fix inherits routing's
+  decision exactly instead of adding a second, contradicting opinion. And
+  mutations are coalesced on a timer rather than handled per record, because an
+  xterm pane is a continuous mutation stream. The real remote path moves to the
+  row's `title`, matching how child rows already expose theirs.
 - **A dead SSH channel froze the pane with no diagnostic.** `shell.write()`
   failures were swallowed by an empty `catch`. When the channel dies without
   emitting `close` — half-open TCP after a VPN drop or a server-side idle kill —
@@ -142,14 +167,35 @@ the Node and browser halves, or between this package and the *other* copy of
   reconnects, which presents exactly like the bug above. The failure is now
   reported into the pane and the socket closed with `1011`.
 
-The suite is now 80 tests / 11 suites. The added one asserts that the patched
-constructor still exposes all four state constants *and* that a keystroke really
-reaches the socket through better-sidebar's own guard expression; it was verified
-to fail against the pre-fix bundle (`patched WebSocket lost the static
-CONNECTING`), so it is a regression test rather than a tautology. The WebSocket
-stub in `test/browser-bundle.test.js` is now a `class` carrying all four
-constants — it used to be a plain function with only `OPEN`, which is part of why
-nothing caught this.
+That fix added one test, taking the suite from 79 / 11 to 80 / 11. It asserts
+that the patched constructor still exposes all four state constants *and* that a
+keystroke really reaches the socket through better-sidebar's own guard
+expression; it was verified to fail against the pre-fix bundle (`patched
+WebSocket lost the static CONNECTING`), so it is a regression test rather than a
+tautology. The WebSocket stub in `test/browser-bundle.test.js` is now a `class`
+carrying all four constants — it used to be a plain function with only `OPEN`,
+which is part of why nothing caught this.
+
+The suite is now 102 tests / 14 suites. The caption fix is covered at two levels.
+`test/root-label.test.js` (17 tests, 3 suites) drives `remoteDisplayName()`,
+`rootLabelFixes()` and `fixExplorerRootLabels()` against a stub tree: the
+local-folder false positive, the shape fallback's documented coincidence, two
+panels for two sessions, the remote filesystem root (`/` → `root`), child rows
+that are themselves named like an encoded tail, idempotence, and a DOM that
+throws. `test/browser-bundle.test.js` gained five tests that drive the *shipped
+bundle* through a stub `document` and `MutationObserver`: relabel on mount;
+re-apply after a simulated re-render and stop after `dispose()`; leave a
+decodable local folder alone; mount cleanly with no DOM at all; and carry no
+`node:fs`. Verified to have teeth — reverting both source files to their pre-fix
+state and rebuilding turned three of those five red, and `root-label.test.js`
+could no longer even import the helpers, which fails the whole file. The
+"leave a local folder alone" test passes both ways by design: it is a negative
+test guarding against over-reach, not against this defect.
+
+`scripts/verify-live.mjs` gained three assertions on the same subject and is now
+**14 checks**. They run against the bundle the server actually hands to browsers
+and the placeholder cwd built from the root the host reports, so the caption is
+verified end to end rather than only in a stub.
 
 ## 0.1.0 - unreleased
 

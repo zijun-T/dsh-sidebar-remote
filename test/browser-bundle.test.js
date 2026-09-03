@@ -432,3 +432,188 @@ test('a host that does not serve the endpoint degrades without stalling', async 
     `a failed probe must be reported, got ${JSON.stringify(warns)}`,
   )
 })
+
+// --- Files-panel root label -------------------------------------------------
+//
+// better-sidebar derives the Files panel's root-row caption locally:
+//   const root = cwd;            // client-registry.js:11993
+//   children: baseName$1(root)   // client-registry.js:12114
+// A remote session's cwd is the placeholder <root>/<hostId>/<base64url>, so the
+// row captioned itself "L2hvbWUvcmVtb3RlL3dz" while the workspace row, the
+// breadcrumb and the shell prompt all said "ws". These tests drive the *shipped
+// bundle* through a stub DOM, because the unit tests in root-label.test.js can
+// only see the tsc output — and the last defect that reached users did so
+// precisely because the bundle and the tsc output were not the same code.
+
+// The DOM surface the fix touches, and nothing more. If it ever reaches further,
+// these tests throw instead of silently passing a browser-only path.
+function stubEl(className, textContent = '', children = []) {
+  const node = {
+    className,
+    textContent,
+    children,
+    attrs: {},
+    setAttribute(name, value) { this.attrs[name] = value },
+    getAttribute(name) { return this.attrs[name] ?? null },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null },
+    querySelectorAll(sel) {
+      const want = /^\[class\*="([^"]+)"\]$/.exec(sel)?.[1]
+      if (!want) throw new Error(`stub only supports [class*="…"], got ${sel}`)
+      const out = []
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (String(c.className).includes(want)) out.push(c)
+          walk(c)
+        }
+      }
+      walk(this)
+      return out
+    },
+  }
+  return node
+}
+
+// shaped like better-sidebar's explorer body: root row first, then depth-0 rows
+function stubPanel(rootText, childNames) {
+  const rootRow = stubEl('nArs4W_explorerRow', '', [
+    stubEl('svg'),
+    stubEl('nArs4W_explorerName', rootText),
+    stubEl('nArs4W_explorerRef'),
+  ])
+  const body = stubEl('nArs4W_explorerBody', '', [
+    rootRow,
+    ...childNames.map((name) => stubEl('nArs4W_explorerRow', '', [
+      stubEl('svg'),
+      stubEl('nArs4W_explorerName', name),
+    ])),
+  ])
+  const tree = stubEl('#document', '', [body])
+  return {
+    body: tree,
+    rootRow,
+    label: rootRow.children[1],
+    childLabels: childNames.map((_, i) => body.children[i + 1].children[1]),
+    doc: { body: tree, querySelectorAll: (sel) => tree.querySelectorAll(sel) },
+  }
+}
+
+// Captures the callback so a test can emulate a React re-render.
+function installDom(sandbox, doc) {
+  const observers = []
+  sandbox.document = doc
+  sandbox.MutationObserver = class FakeMutationObserver {
+    constructor(cb) { this.cb = cb; this.targets = []; observers.push(this) }
+    observe(target, opts) { this.targets.push({ target, opts }) }
+    disconnect() { this.disconnected = (this.disconnected ?? 0) + 1 }
+  }
+  return observers
+}
+
+test('bundle relabels the Files-panel root row for a remote session', () => {
+  const { exports, sandbox } = loadBundle()
+  const panel = stubPanel(ENCODED, ['references.bib', 'src'])
+  const observers = installDom(sandbox, panel.doc)
+
+  exports.apply(makeCtx(sandbox, REMOTE_CWD))
+
+  assert.equal(observers.length, 1, 'the fix must be watching the DOM')
+  assert.equal(observers[0].targets.length, 1)
+  // document.body, not the panel layer: better-sidebar appends
+  // [data-dsh-panel-host] after plugins mount, so observing it would miss the
+  // first paint.
+  assert.equal(observers[0].targets[0].target, panel.doc.body)
+  // Field by field, not deepEqual: the options object comes from the vm realm,
+  // so a strict prototype comparison would fail for reasons that say nothing.
+  const opts = observers[0].targets[0].opts
+  assert.equal(opts.childList, true)
+  assert.equal(opts.subtree, true)
+  assert.equal(opts.characterData, true)
+  // Attributes must NOT be observed — the fix sets `title`, and watching that
+  // would turn every fix into a fresh mutation.
+  assert.equal(Object.keys(opts).length, 3, 'observing attributes would feed the fix its own mutations')
+
+  assert.equal(panel.label.textContent, 'ws', 'the root row must show the real folder name')
+  assert.equal(
+    panel.rootRow.getAttribute('title'),
+    REMOTE_PATH,
+    'the real remote path must stay reachable on hover, as it is on child rows',
+  )
+  assert.deepEqual(
+    panel.childLabels.map((c) => c.textContent),
+    ['references.bib', 'src'],
+    'child rows carry real remote names and must never be touched',
+  )
+})
+
+test('bundle re-applies the label after a re-render, and stops on dispose', async () => {
+  const { exports, sandbox } = loadBundle()
+  const panel = stubPanel(ENCODED, ['a.txt'])
+  const observers = installDom(sandbox, panel.doc)
+  const handle = exports.apply(makeCtx(sandbox, REMOTE_CWD))
+  assert.equal(panel.label.textContent, 'ws')
+
+  // React owns that text: a session switch or tree reload puts the encoded
+  // caption straight back. The observer must undo it again.
+  panel.label.textContent = ENCODED
+  panel.rootRow.attrs = {}
+  observers[0].cb()
+  // Mutations are coalesced on a timer rather than handled per record, because an
+  // xterm pane is a continuous mutation stream and a full re-scan per record
+  // would be measurable.
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(panel.label.textContent, 'ws', 'the observer must re-apply the label')
+  assert.equal(panel.rootRow.getAttribute('title'), REMOTE_PATH)
+
+  handle.dispose()
+  assert.equal(observers[0].disconnected, 1, 'dispose must disconnect the observer')
+  panel.label.textContent = ENCODED
+  observers[0].cb()
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(panel.label.textContent, ENCODED, 'after dispose the DOM must be left alone')
+})
+
+test('bundle leaves a local workspace root alone, including one whose name decodes', () => {
+  // "L2E" decodes to "/a" and re-encodes to itself. A fix that matched on "this
+  // text decodes" would caption a perfectly ordinary local folder "a". The label
+  // is derived from routeOf() instead, so a local session produces nothing to
+  // apply — this is the local-zero-regression invariant, at the DOM level.
+  const encodedName = 'L2E'
+  const { exports, sandbox } = loadBundle()
+  const panel = stubPanel(encodedName, ['keep.txt'])
+  installDom(sandbox, panel.doc)
+
+  exports.apply(makeCtx(sandbox, `/home/build/_local/${encodedName}`))
+
+  assert.equal(panel.label.textContent, encodedName)
+  assert.equal(panel.rootRow.getAttribute('title'), null)
+})
+
+test('bundle mounts cleanly with no DOM at all', async () => {
+  // Node unit tests, SSR, or any host without a document: routing must still
+  // work and nothing may throw. Every other test in this file relies on this.
+  const { exports, sandbox, fetchCalls } = loadBundle()
+  assert.equal(typeof sandbox.document, 'undefined')
+  assert.equal(typeof sandbox.MutationObserver, 'undefined')
+  const handle = exports.apply(makeCtx(sandbox, REMOTE_CWD))
+  // Routed *before* dispose: dispose restores the original fetch, which is the
+  // point of it.
+  await sandbox.fetch(`${ORIGIN}/sidebar/api/fs.tree`, {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: 'session-remote', path: '.' }),
+  })
+  assert.equal(fetchCalls[0].url, '/sidebar/remote/api/fs.tree')
+  handle.dispose()
+})
+
+test('bundle carries no node:fs — the display-name helper is mirrored, not imported', () => {
+  // dsh-ssh already has placeholderDisplayName(), but its placeholder.js does
+  // `import fs from 'node:fs'` at top level, which esbuild would leave external
+  // and turn into a require() the browser cannot satisfy — and the loader
+  // factory in loadBundle() throws on any require(). Belt and braces: assert on
+  // the bytes too, so a future import of that module fails here rather than in
+  // somebody's browser.
+  const code = readFileSync(bundlePath, 'utf8')
+  assert.ok(!/require\(["']node:fs["']\)/.test(code), 'the client bundle must not require node:fs')
+  assert.ok(!/require\(["']fs["']\)/.test(code), 'the client bundle must not require fs')
+  assert.ok(code.includes('remoteDisplayName'), 'the mirrored helper must be in the bundle')
+})

@@ -9,8 +9,8 @@
 | 单包插件 | `package.json` → `dsh-sidebar-remote@0.2.0` | 0.2.0 从 `@remote/sidebar-remote` 改名而来（详见 §6）。`peerDependencies` 精确 pin `dsh-better-sidebar@0.17.1` / `@dsh-ssh/dsh-ssh@0.1.3`；`dsh.bundle.patch→./cordis.patch.yml`；`files=["lib/","src/","scripts/","test/","docs/","tsconfig.json","cordis.patch.yml","CHANGELOG.md","README.md"]`；`sideEffects=["./lib/client.js"]`；`author`/`repository`/`homepage`/`bugs` 指向 `github.com/zijun-T/dsh-sidebar-remote` |
 | Host/Client 源码 | `src/host/{index,remote-fs,remote-git,remote-pty,ssh-shell-patch,compat}.ts` · `src/client/index.ts` · `src/shared/{router,wire}.ts` | 受控内嵌按 `compatibility.md §4.3` 标注 `Source`；PTY 以 `ssh-shell-patch.ts` 受控补丁扩展 `SshConn.prototype.shell`（复用 `_execChannel` 的 `isNotConnectedError→_dead/_resetDeadState→connect→doShell` 重连与 `SshError{stage:'shell-open'}` 包装） |
 | 构建产物 | `lib/**`（`host/*` + `client/*` + `shared/*`） | `pnpm build: tsc -p tsconfig.json` 产出，已验 `ssh-shell-patch.{js,d.ts}` 在 `lib/host/index.js:80` 调用链可审计 |
-| 测试 | `test/{router,wire,policy-and-quote,timeout-cleanup,remote-branch,remote-client-routing,browser-bundle,host-remote-fixes}.test.js` | `80 pass / 11 suites`；`browser-bundle` 在**无 Node `Buffer`** 的 vm 沙箱里跑真实 bundle（强制走 polyfill，才能暴露 base64url 缺陷），覆盖跨 `HOME` 占位路径、探测时序、权威 root 压制兜底、WS 同步兜底、404 降级、以及**打过补丁的 `WebSocket` 必须保留静态状态常量**（否则上游键盘守卫恒假，见 §8）|
-| 真机验收脚本 | `scripts/verify-live.mjs`（`npm run verify:live`） | 拉取服务器交给浏览器的那一份 bundle，vm 沙箱运行并把 `fetch`/`WebSocket` 接到真实服务，驱动真实 SSH；11 项断言全绿。占位 cwd 由**宿主自己报告的 root** 拼出，不硬编码任何机器的 home。**调用前提**：`DSH_ORIGIN`/`DSH_HOST_ID`/`DSH_REMOTE_PATH`/`DSH_EXPECT_ENTRY` 必须显式传 —— 入库默认值是脱敏后的合成值，裸跑只能得到 7/11（详见 `verification.md` §10.6 末条）|
+| 测试 | `test/{router,wire,policy-and-quote,timeout-cleanup,remote-branch,remote-client-routing,browser-bundle,host-remote-fixes,root-label}.test.js` | `102 pass / 14 suites`；`browser-bundle` 在**无 Node `Buffer`** 的 vm 沙箱里跑真实 bundle（强制走 polyfill，才能暴露 base64url 缺陷），覆盖跨 `HOME` 占位路径、探测时序、权威 root 压制兜底、WS 同步兜底、404 降级、**打过补丁的 `WebSocket` 必须保留静态状态常量**（否则上游键盘守卫恒假，见 §8）、以及**真实 bundle 在 stub DOM 上必须把 Files 面板根行改成远端目录名、且不得误改能解码的本地目录**（见 §9）|
+| 真机验收脚本 | `scripts/verify-live.mjs`（`npm run verify:live`） | 拉取服务器交给浏览器的那一份 bundle，vm 沙箱运行并把 `fetch`/`WebSocket` 接到真实服务，驱动真实 SSH；14 项断言全绿。占位 cwd 由**宿主自己报告的 root** 拼出，不硬编码任何机器的 home。**调用前提**：`DSH_ORIGIN`/`DSH_HOST_ID`/`DSH_REMOTE_PATH`/`DSH_EXPECT_ENTRY` 必须显式传 —— 入库默认值是脱敏后的合成值，裸跑只能得到 10/14（详见 `verification.md` §10.6 末条）|
 | 文档 | `docs/{architecture,compatibility,verification,review,delivery}.md` · `README.md` | 详见各文档；本文件汇总安装/迁移/验收与已知限制 |
 | 锁文件 | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` 可复现 |
 
@@ -20,12 +20,12 @@
 |------|--------|------|
 | `pnpm install --frozen-lockfile` | 0 | Already up to date / 218ms / pnpm v11.25.0 |
 | `tsc -p tsconfig.json` | 0 | 0 errors |
-| `node --test test/*.test.js` | 0 | `80 pass / 11 suites / ~110ms` |
-| `npm run build` | 0 | `lib/client.js` **85814 bytes**（0.2.0 改名审计时为 85406，见 §6.3；其后因终端输入修复而变，见 §8）；构建日志打印烙进的兜底 home。**注**：esbuild 未压缩，依附于**对象字面量属性**的注释会进产物（依附于语句的不会），所以注释文本会影响字节数 —— 已实测确认（同一代码、仅改一处属性注释：85617 ↔ 85814）|
-| `npm pack --pack-destination dist` | 0 | `dist/dsh-sidebar-remote-0.2.0.tgz` · **58 文件**（稳定不变量）/ ≈157 kB 压缩 / ≈523 kB 解包；`prepack` 自动重建 `lib/`。不钉精确字节数：`docs/` 本身在包内，改文档就会改包大小，追逐精确值是个收不敛的自指回归 |
-| 解包审计 | 0 | 解包副本（symlink **全部 7 个**上游 peer）直跑 `node --test test/*.test.js` → `80 pass / 11 suites / 0 fail`，证明打包产物自足。**注**：peer 必须全挂，只挂一个会以 `ERR_MODULE_NOT_FOUND: @dsh-ssh/dsh-ssh` 假失败 7 项 —— 那是审计脚手架的错、非产物缺陷（`verification.md` §11.5 ②）|
-| 产物一致性 | 0 | tarball 内**全部 58 个文件**与工作区**逐字节一致**（`cmp -s` 逐个比对，0 差异）；tarball 内 `lib/client.js` 与**线上服务返回的 bundle**（rev `a2e8d79c4349`，85814 bytes）逐字节一致 |
-| `DSH_HOST_ID=… DSH_REMOTE_PATH=… DSH_EXPECT_ENTRY=… npm run verify:live` | 0 | `11/11 checks passed`（真机 SSH，详见 `verification.md §10`）。**四个环境变量缺一不可**：脚本的入库默认值是脱敏后的合成值，裸跑会以 `host "11111111-…" not configured` 失败 4 项而得到 7/11 —— 那是调用错误、非产品缺陷（`verification.md` §10.6 末条）|
+| `node --test test/*.test.js` | 0 | `102 pass / 14 suites / ~470ms` |
+| `npm run build` | 0 | `lib/client.js` **90384 bytes**（0.2.0 改名审计时为 85406，见 §6.3；其后因终端输入修复而变，见 §8；再因 Files 面板根标签修复而变，见 §9）；构建日志打印烙进的兜底 home。**注**：esbuild 未压缩，依附于**对象字面量属性**的注释会进产物（依附于语句的不会），所以注释文本会影响字节数 —— 已实测确认（同一代码、仅改一处属性注释：85617 ↔ 85814）|
+| `npm pack --pack-destination dist` | 0 | `dist/dsh-sidebar-remote-0.2.0.tgz` · **59 文件**（稳定不变量）/ ≈181 kB 压缩 / ≈588 kB 解包；`prepack` 自动重建 `lib/`。不钉精确字节数：`docs/` 本身在包内，改文档就会改包大小，追逐精确值是个收不敛的自指回归 |
+| 解包审计 | 0 | 解包副本（symlink **全部 7 个**上游 peer）直跑 `node --test test/*.test.js` → `102 pass / 14 suites / 0 fail`，证明打包产物自足。**注**：peer 必须全挂，只挂一个会以 `ERR_MODULE_NOT_FOUND: @dsh-ssh/dsh-ssh` 假失败 8 个文件 —— 那是审计脚手架的错、非产物缺陷（`verification.md` §11.5 ②）|
+| 产物一致性 | 0 | tarball 内**全部 59 个文件**与工作区**逐字节一致**（`cmp -s` 逐个比对，0 差异）；tarball 内 `lib/client.js` 与**线上服务返回的 bundle**（rev `6529611fc875`，90384 bytes）逐字节一致 |
+| `DSH_HOST_ID=… DSH_REMOTE_PATH=… DSH_EXPECT_ENTRY=… npm run verify:live` | 0 | `14/14 checks passed`（真机 SSH，详见 `verification.md §10`）。**四个环境变量缺一不可**：脚本的入库默认值是脱敏后的合成值，裸跑会以 `host "11111111-…" not configured` 失败 4 项而得到 10/14 —— 那是调用错误、非产品缺陷（`verification.md` §10.6 末条）|
 
 工作区核验：`find remote-sidebar-plugin -type f` 无 `dist/` 外的 `*.tgz` 残留、`~/.ssh`/`settings.yaml` 未被改写、`.npmrc` 仅含 `strict-peer-dependencies`/`auto-install-peers` 两项、源码无明文口令。
 
@@ -50,7 +50,7 @@ dsh plugin --profile web remove dsh-sidebar-remote
 
 **换机部署不需要重新构建。** 客户端在挂载时向 `GET /sidebar/remote/root` 取回权威占位根并回填给 `routeByCwd(cwd, env)`，而 `DSH_SSH_REMOTE_ROOT` 在 `remoteRoot()` 里优先级最高，因此构建时烙进 `lib/client.js` 的 home 只是兜底，一份 bundle 可服务任意部署。只有想让兜底值也正确时才需交叉构建：`DSH_BUILD_HOME=/home/alice npm run build`。
 
-**安装后验收：** `npm run verify:live`（可换 `DSH_ORIGIN`/`DSH_HOST_ID`/`DSH_REMOTE_PATH`/`DSH_EXPECT_ENTRY`），11 项断言覆盖从 bundle 载入到真实 SSH 的完整链路。
+**安装后验收：** `npm run verify:live`（**必须**传 `DSH_ORIGIN`/`DSH_HOST_ID`/`DSH_REMOTE_PATH`/`DSH_EXPECT_ENTRY`，入库默认值是脱敏合成值），14 项断言覆盖从 bundle 载入到真实 SSH 的完整链路。
 
 **版本约束：** DSH `0.1.1-rc.2`（Cordis `^4.0.1`），`Node >=22`（与 `@dsh-ssh/dsh-ssh engines` 对齐），`dsh-better-sidebar@0.17.1` / `@dsh-ssh/dsh-ssh@0.1.3` 由 `package.json`+`pnpm-lock.yaml` 锁定，`src/host/compat.ts:assertCompat` 于 `apply` 首行校验。
 
@@ -72,11 +72,11 @@ dsh plugin --profile web remove dsh-sidebar-remote
 - [x] `CHANGELOG.md`（Keep a Changelog 格式，0.2.0 / 0.1.0，含改名条目）
 - [x] `sideEffects: ["./lib/client.js"]`（该 bundle 在模块作用域调 `window.__ModuleLoader__.load()`，不得被摇树删除）
 - [x] `publishConfig.access` 已**删除**：无 scope 包上它是 no-op，留着反而暗示包仍是 scoped
-- [x] `files` 含 `lib/ src/ scripts/ test/ docs/ tsconfig.json cordis.patch.yml CHANGELOG.md README.md`，实测 58 文件；`npm pack` 清单中确认**不含** `node_modules/`、`.npmrc`、`*.tgz`、`*.map`、`tsconfig.tsbuildinfo` 与开发期探针脚本
+- [x] `files` 含 `lib/ src/ scripts/ test/ docs/ tsconfig.json cordis.patch.yml CHANGELOG.md README.md`，实测 59 文件；`npm pack` 清单中确认**不含** `node_modules/`、`.npmrc`、`*.tgz`、`*.map`、`tsconfig.tsbuildinfo` 与开发期探针脚本
 - [x] `prepack`/`prepare` 改为直调 `tsc` + `node scripts/build-client.mjs`，不再绑定 `pnpm`（本机曾出现 `pnpm: command not found`）
 - [x] `.gitignore`（`lib/` 不入库，避免构建产物与 `src/` 漂移 —— 上一轮的 base64url 缺陷就是因为产物与源码不一致而“测试全绿”）
-- [x] tarball 解包审计：解包副本直跑 `80 pass / 0 fail`
-- [x] 真机端到端：`npm run verify:live` → `11/11`（需显式传 `DSH_HOST_ID` 等四个环境变量；裸跑用脱敏默认值只得 7/11，见 `verification.md` §10.6）
+- [x] tarball 解包审计：解包副本直跑 `102 pass / 0 fail`
+- [x] 真机端到端：`npm run verify:live` → `14/14`（需显式传 `DSH_HOST_ID` 等四个环境变量；裸跑用脱敏默认值只得 10/14，见 `verification.md` §10.6）
 
 **发布与部署事项（我无法代做的部分；第 1 项已完成，留此作记录）：**
 
@@ -230,3 +230,75 @@ const inputSub = term.onData((data) => {
 | 产物一致性 | 线上 rev `a2e8d79c4349`、85814 bytes，与磁盘 `lib/client.js` **IDENTICAL** |
 
 服务从磁盘读 `lib/client.js` 并现算 `rev`，所以**不需重启 DSH**，浏览器刷新即可拿到修复。
+
+---
+
+## 9. Files 面板根行显示 base64url 尾巴（仓库公开后修复）
+
+现象：远端工作区的文件树**内容全对**，但顶部根行读作 `L2hvbWUvcmVtb3RlL3dz`，而同一个会话的左侧工作区行、中间面包屑、终端提示符都显示真实目录名。判定方法与实测数据见 `verification.md` §12。
+
+### 9.1 逐元素定位
+
+| 界面元素 | 显示 | 来源 | 是否正确 |
+|---|---|---|---|
+| 左侧工作区行 | `<主机名> / ws` | DSH core 调 dsh-ssh 的 `placeholderWorkspaceTitle()` | ✓ |
+| 中间面包屑 | `<主机名> / ws` | 同上 | ✓ |
+| 终端提示符 | `remote@remotehost:~/ws$` | 远端 shell 自己 | ✓ |
+| **Files 面板根行** | **`L2hvbWUvcmVtb3RlL3dz`** | better-sidebar `FileTree`：`const root = cwd`（`client-registry.js:11993`）→ `baseName$1(root)`（`:12114`） | **✗** |
+| Files 面板里的子行 | 真实远端文件名 | 我们的 `fs.tree`（返回解码后的真实路径） | ✓ |
+
+三处对、一处错，正是它长期没被注意到的原因 —— 内容对得让人以为标签也对。
+
+### 9.2 为何线路层修不了
+
+根标签是**客户端本地**对 `scope.cwd`（`cwd: folderRoot ?? scope.cwd`）取 basename 得出的，而远端会话的 `cwd` 就是占位路径 `<root>/<hostId>/<base64url>`，basename 自然是那段编码。三条排除证据：
+
+| 可能的干净修法 | 实测结论 |
+|---|---|
+| 让客户端消费宿主 `session.cwd` 返回的 `root` 标签 | 上游**没有任何一处**读那个字段（0.17.1 里它是死代码） |
+| 升 pin 到 `0.18.0-alpha.0` | 逻辑逐字相同（`const root = cwd` → `baseName$1(root)`），全文无占位解码引用 —— 上游没修 |
+| 把 `cwd` 改成真实远端路径 | 不可行：占位路径正是**所有路由判定的键**，改了会同时打断 `fs.*`/`git.*`/PTY 三路 |
+
+讽刺的是 `@dsh-ssh/dsh-ssh` **早就知道这个陷阱**：`placeholder.js` 的注释原文写着「The placeholder directory name is a base64-encoded segment (e.g. L2hvbWUv...), so we derive the title from the real remote path instead」，并提供了 `placeholderDisplayName()` —— 只是 `FileTree` 从来没调它。而该助手**不能直接 import**：`placeholder.js:13` 顶层 `import fs from 'node:fs'`，esbuild 会把它变成浏览器里无法满足的 `require()`。
+
+### 9.3 修法
+
+在 `shared/router.ts` 里逐字**镜像**那 4 行为 `remoteDisplayName()`（不 import），客户端用 `MutationObserver` 修正**已渲染的文本**：React 拥有那段文本，一次性改写不够 —— 会话切换、树重载、恢复 tab 都会把编码尾巴放回来。真实远端路径写进根行的 `title`，与子行暴露自己路径的方式一致（否则信息反而变少）。
+
+两个刻意约束：
+
+1. **标签由 `routeOf()` 推导，而不是由“这段文本能不能解码”推导。** 本地目录名恰好是规范 base64url 的（`L2E` → `/a`）绝不能被改，否则会破坏“本地零回归”不变量。走 `routeOf()` 意味着本修复**完全继承路由的判定**（包括 `routeByPlaceholderTail` 已记录并接受的巧合面），而不是另加一个可能与之矛盾的第二意见。
+2. **变更合并到定时器上（120 ms），不逐条 record 处理。** xterm 面板是持续的 mutation 流，逐条全量重扫是可测量的开销；而文件夹名 120 ms 的陈旧不可见。另加两次有界重试（250/1000 ms）应付启动竞态：sessions 快照可能在树首次绘制时仍为空，而之后可能没有 mutation 来唤醒 observer。
+
+选择器不能只靠 class：`explorerName` 在三处共用（`12036`/`12075`/`12113`，只有 `12113` 是根行），所以靠“每个 explorer body 的**第一个** explorerRow”定位（`querySelector` 返回文档序首个匹配，而上游先渲染根行再 `renderLevel(root, 0)`），且改写后文本不再匹配任何编码尾巴 → 幂等。
+
+### 9.4 测试基座变化
+
+`80 tests / 11 suites` → **`102 tests / 14 suites`**，新增 22 项。诚实说：**这不是“测试漏网”** —— 在 80 项里根本没有任何一项触及渲染后的 DOM 文本，覆盖面到线路与路由为止。本修复新增的是**第一层 DOM 级覆盖**：
+
+- `test/root-label.test.js`（17 项 / 3 suites）直接驱动 `remoteDisplayName()` / `rootLabelFixes()` / `fixExplorerRootLabels()`：本地目录假阳性、形状兜底的已记录巧合、两个会话两个面板、远端文件系统根（`/` → `root`）、子行本身名字就像编码尾巴、幂等、DOM 抛异常
+- `test/browser-bundle.test.js` +5：用 stub `document` 与 `MutationObserver` 驱动**已发布的 bundle**（挂载即改、重渲染后再改、`dispose()` 后停手、能解码的本地目录不动、完全无 DOM 时干净挂载），并断言 bundle 里**不带 `node:fs`**
+
+已验证**有牙**：把两个源文件退回 HEAD 重建（产物恰为 85814 bytes = HEAD 那一份），上述 5 项里 3 项报红，`root-label.test.js` 则因导入不到助手而整个文件失败；还原后产物与备份逐字节一致。其中“本地目录不动”那项**两边都绿是设计如此** —— 它防的是过度修改（负向测试），不是本缺陷。
+
+`scripts/verify-live.mjs` 同步 +3 项断言（现 **14 checks**），跑在服务器实际下发的那一份 bundle + 宿主自己报告的 root 拼出的占位 cwd 上，所以标签是端到端验的、不只在 stub 里。其中一项先把标签改回编码尾巴、手动触发 observer 回调、再断言它被改回来 —— 那才是“修复”与“一次性重绘”的区别。
+
+### 9.5 验证
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit` | 0 errors |
+| `node --test` | **102 pass / 14 suites / 0 fail** |
+| `npm run verify:live`（显式传四个环境变量） | **14/14**，frames=18；根行标签 = `DSH_REMOTE_PATH` 的 basename，`title` = 真实远端路径 |
+| 裸跑（脱敏合成默认值） | **10/14**；3 项新断言不依赖 SSH（只需 DOM stub + 宿主报告的 root），仍绿；失败的 4 项均为依赖 SSH 的旧断言 |
+| 产物一致性 | 线上 rev `6529611fc875`、90384 bytes，与磁盘 `lib/client.js` **IDENTICAL** |
+| 本地零回归 | 能解码的本地目录名不被改写（单测 + bundle 级各一项）；无 DOM 时静默跳过，路由不受影响 |
+| 真浏览器截图 | **无**。浏览器子代理仍被同一基础设施错误（`Notification handler already registered`）阻塞，已尝试且如实报告失败。DOM 行为已由 stub 驱动的真实 bundle + 真机 14/14 覆盖 |
+
+### 9.6 附带抓到的一处脱敏回退：base64url **不是**脱敏
+
+写本节的源码注释时，我把用户截图里那串标签原样粘进了 `src/client/index.ts`。它是 base64url，解码后正是 §7 已移除的两类信息（真实远端家目录 + 暴露研究工作流的项目目录名）。危险在于：**普通敏感模式 grep 完全扫不到它** —— 字面上既不含用户名也不含路径。`src/` 既入库又在 npm `files` 白名单里，仓库和包会同时发布它。
+
+提交前改用了**解码级扫描**：把入库文件里所有 `[A-Za-z0-9_-]{16,}` 形状的 token 全部 base64url 解码，再对解码结果跑敏感模式。结果：高危命中 **2 处**（同一行的编码 token 与紧随的明文），已按 §7 约定改回合成值，重扫 **0 命中**。附带一个反证：修正前后重建的 `lib/client.js` **sha256 完全相同** —— 该 token 位于语句级注释，esbuild 丢弃它（见 §8.4 注），所以它**从未进入已发布的产物**，只在源码里。
+
+教训两条：① 任何编码/哈希/转写形式都不构成脱敏，扫描必须能**逆向**到明文；② 从用户提供的截图、日志、转写里拷任何东西进仓库前，先当作未脱敏输入处理。
