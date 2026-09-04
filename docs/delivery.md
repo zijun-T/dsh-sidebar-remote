@@ -31,7 +31,7 @@
 
 ## 3. 安装 / 卸载 / 换设备
 
-**安装（单次挂载三行，自动处理传递依赖）：**
+**安装（单次挂载，自动处理传递依赖）：**
 ```bash
 dsh plugin --profile web add /path/to/remote-sidebar-plugin   # 本地路径
 dsh plugin --profile web add ./dist/dsh-sidebar-remote-0.2.0.tgz   # 发布产物（推荐换机部署）

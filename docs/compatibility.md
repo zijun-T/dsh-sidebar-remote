@@ -73,44 +73,40 @@
 
 ## 4. 选定实现路径的详细约定
 
-### 4.1 依赖声明
+### 4.1 依赖声明（当前 `package.json` 实际值）
 
 ```json
 {
   "dependencies": {
-    "dsh-better-sidebar": "0.17.1",
-    "@dsh-ssh/dsh-ssh": "0.1.3",
+    "buffer": "^6.0.3",
+    "diff": "^9.0.0",
     "ssh2": "^1.17.0",
-    "diff": "^9.0.0"
+    "ws": "^8.18.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6"
+    "@dsh-ssh/dsh-ssh": "0.1.3",
+    "dsh-better-sidebar": "0.17.1"
   },
   "engines": { "node": ">=22" }
 }
 ```
 
-`pnpm-lock.yaml` 提交，`pnpm install --frozen-lockfile` 可复现。
+`pnpm-lock.yaml` 已提交，`pnpm install --frozen-lockfile` 可复现。
 
-### 4.2 `cordis.patch.yml` 形态（需经 `t2` 实测去重）
+### 4.2 `cordis.patch.yml` 当前形态
 
 ```yaml
 - insert:
-    - id: better-sidebar
-      name: 'dsh-better-sidebar'
-      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-better-sidebar' && e.options.id !== 'better-sidebar' && !e.disabled)"
-    - id: '@dsh-ssh/dsh-ssh'
-      name: '@dsh-ssh/dsh-ssh'
-      config: { maxConnections: 4 }
     - id: remote-sidebar
-      name: '@scope/remote-sidebar-plugin'
+      name: 'dsh-sidebar-remote'
 ```
 
-- 若用户 profile 已含 `dsh-better-sidebar` 或 `@dsh-ssh/dsh-ssh` 的旧行，上述 `disabled` guard 使旧行优先生效，避免 `duplicate prefix route` 导致整棵插件树启动失败。
-- `remote-sidebar` 行无需 guard（聚合包自身唯一），但需在文档中提示“若曾手动挂载旧版聚合包，先 `dsh plugin remove` 再 `add`”。
+上游两个插件（`dsh-better-sidebar`、`@dsh-ssh/dsh-ssh`）通常已随 profile 安装，聚合包只 insert 自己。若部署环境缺少上游，可取消注释添加回三行格式（含 `disabled: !!js` 去重 guard）。
 
 ### 4.3 受控内嵌清单（t2 需在源码头部标注 `Source: dsh-better-sidebar@0.17.1 src/<file>.ts | @dsh-ssh/dsh-ssh@0.1.3 src/<file>.js`）
 
