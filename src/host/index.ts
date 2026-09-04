@@ -458,7 +458,10 @@ async function dispatchRemote(
       const { text } = await remoteReadText(conn, p, 10*1024*1024)
       // Window chunking like better-sidebar's buildWindow (line/length/bytes caps)
       const { window: w, truncated } = buildWindow(text, resolved.readLimit)
-      return { path: p, content: w, truncated, size: Buffer.byteLength(text,'utf8') }
+      // better-sidebar's client gates content on `result.kind === "text"`:
+      //   content: result.kind === "text" ? result.content : ""
+      // Without `kind: "text"` the editor opens the tab but renders empty.
+      return { kind: 'text', path: p, content: w, truncated, size: Buffer.byteLength(text,'utf8') }
     }
     case 'fs.write':
     case 'fsWrite': {
