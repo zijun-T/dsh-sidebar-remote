@@ -547,19 +547,66 @@ function installRootLabelFix(
   }
 }
 
+// --- <a>-click interceptor for /sidebar/file → /sidebar/remote/file --------
+// better-sidebar's download creates a throwaway <a> and clicks it (not fetch),
+// so patchedFetch never sees the request. The click navigates to
+// /sidebar/file?sessionId=…&path=…&download=1 which hits better-sidebar's
+// LOCAL file handler; that handler calls realpath() on the remote path and
+// fails with ENOENT. Intercept the click in capture phase and rewrite the
+// href to /sidebar/remote/file before the browser follows it.
+function installDownloadRewrite(
+  ctx: unknown,
+  logger?: { info(s:string):void; warn(s:string):void },
+): { dispose(): void } {
+  const g = globalThis as unknown as { document?: { addEventListener?(t:string,fn:(e:unknown)=>void,o?:unknown):void; removeEventListener?(t:string,fn:(e:unknown)=>void,o?:unknown):void } }
+  if (!g.document?.addEventListener) return { dispose() {} }
+  const onClick = (raw: unknown) => {
+    const e = raw as { target?: unknown; defaultPrevented?: boolean }
+    if (e.defaultPrevented) return
+    // Walk up from target to find the nearest <a>
+    let node = e.target as { tagName?: string; closest?(s:string): { href?: string; setAttribute?(n:string,v:string):void } | null } | null
+    while (node && (node.tagName ?? '').toUpperCase() !== 'A') {
+      node = (node as unknown as { parentElement?: typeof node }).parentElement ?? null
+    }
+    if (!node) return
+    const anchor = node as { href?: string; setAttribute?(n:string,v:string):void }
+    if (!anchor.href) return
+    let u: URL
+    try { u = new URL(anchor.href) } catch { return }
+    // Only same-origin /sidebar/file
+    if (typeof location !== 'undefined' && u.origin !== location.origin) return
+    if (u.pathname !== '/sidebar/file') return
+    const sid = u.searchParams.get('sessionId') ?? undefined
+    const cwd = u.searchParams.get('cwd') || cwdOfSessionId(ctx, sid)
+    if (!cwd || routeOf(cwd).kind !== 'remote') return
+    // Rewrite to the remote file route, preserving all query params
+    u.pathname = '/sidebar/remote/file'
+    try { anchor.setAttribute?.('href', u.toString()) } catch {}
+  }
+  try { g.document.addEventListener('click', onClick, true) } catch {}
+  return {
+    dispose() {
+      try { g.document?.removeEventListener?.('click', onClick, true) } catch {}
+    },
+  }
+}
+
 export function apply(ctx: unknown) {
   const c = ctx as { logger?: { info(s:string):void; warn(s:string):void }; effect?(fn:()=>(()=>void)|void, label?: string): void }
   c.logger?.info?.('[remote-sidebar] client overlay mounted (fetch + WS remote routing active)')
   let handle: { dispose():void } | undefined
   let labelFix: { dispose():void } | undefined
+  let dlFix: { dispose():void } | undefined
   try { handle = installFetchPatch(ctx, c.logger) } catch (e) { c.logger?.warn?.(`[remote-sidebar] fetch patch failed: ${(e as Error)?.message ?? String(e)}`) }
   try { labelFix = installRootLabelFix(ctx, c.logger) } catch (e) { c.logger?.warn?.(`[remote-sidebar] root-label fix failed: ${(e as Error)?.message ?? String(e)}`) }
+  try { dlFix = installDownloadRewrite(ctx, c.logger) } catch (e) { c.logger?.warn?.(`[remote-sidebar] download rewrite failed: ${(e as Error)?.message ?? String(e)}`) }
 
   // Wrap in cordis effect so dispose is auto on reload
   try {
     c.effect?.(() => () => {
       try { handle?.dispose() } catch {}
       try { labelFix?.dispose() } catch {}
+      try { dlFix?.dispose() } catch {}
     }, 'remote-sidebar: client patch teardown')
   } catch {}
 
@@ -567,6 +614,7 @@ export function apply(ctx: unknown) {
     dispose() {
       try { handle?.dispose() } catch {}
       try { labelFix?.dispose() } catch {}
+      try { dlFix?.dispose() } catch {}
     },
   }
 }
