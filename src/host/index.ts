@@ -119,6 +119,55 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // Instead, we wrap systemPrompt.assemble directly like dsh-chinese-mode does.
   const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
   console.log(`[remote-sidebar] systemPrompt available: ${!!sp}, has assemble: ${!!sp?.assemble}`)
+  // Debug: inspect ctx.sessions structure
+  try {
+    const sessions = ctx.sessions as unknown
+    console.log('[remote-sidebar] ctx.sessions type:', typeof sessions)
+    if (typeof sessions === 'object' && sessions !== null) {
+      const keys = Object.keys(sessions)
+      console.log('[remote-sidebar] ctx.sessions keys:', keys)
+      if ('list' in sessions) {
+        const list = (sessions as { list?: unknown }).list
+        console.log('[remote-sidebar] ctx.sessions.list type:', typeof list)
+        if (typeof list === 'function') {
+          // list is a function, call it with proper this binding
+          try {
+            const snap = list.call(sessions)
+            console.log('[remote-sidebar] list() result type:', typeof snap)
+            if (typeof snap === 'object' && snap !== null) {
+              console.log('[remote-sidebar] list() result keys:', Object.keys(snap))
+              if ('byId' in snap) {
+                const byId = (snap as { byId?: Record<string, unknown> }).byId
+                console.log('[remote-sidebar] byId type:', typeof byId)
+                if (typeof byId === 'object' && byId !== null) {
+                  console.log('[remote-sidebar] byId keys:', Object.keys(byId))
+                  for (const [id, session] of Object.entries(byId)) {
+                    const s = session as { header?: { cwd?: string } }
+                    const cwd = s?.header?.cwd
+                    console.log(`[remote-sidebar]   session ${id}: cwd=${cwd}`)
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.log(`[remote-sidebar] list() error: ${(e as Error).message}`)
+          }
+        } else if (typeof list === 'object' && list !== null) {
+          const listKeys = Object.keys(list)
+          console.log('[remote-sidebar] ctx.sessions.list keys:', listKeys)
+          if ('getSnapshot' in list) {
+            const snap = (list as { getSnapshot?(): unknown }).getSnapshot?.()
+            console.log('[remote-sidebar] getSnapshot() result type:', typeof snap)
+            if (typeof snap === 'object' && snap !== null) {
+              console.log('[remote-sidebar] getSnapshot() result keys:', Object.keys(snap))
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[remote-sidebar] ctx.sessions debug error: ${(e as Error).message}`)
+  }
   if (sp && typeof sp.assemble === 'function') {
     const origAssemble = sp.assemble.bind(sp)
     let firstCallLogged = false
@@ -136,14 +185,18 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
         // Build map of placeholder → real remoteCwd
         const map = new Map<string, string>()
         try {
-          const snap = (ctx.sessions as unknown as { list?: { getSnapshot?(): { byId?: Record<string, { header?: { cwd?: string } }> }; all?(): Array<{ header?: { cwd?: string } }> } }).list?.getSnapshot?.()
-          console.log(`[remote-sidebar] assemble: getSnapshot() returned:`, JSON.stringify({ hasById: !!snap?.byId, byIdKeys: Object.keys(snap?.byId ?? {}) }))
-          const entries = snap?.byId ? Object.values(snap.byId) : ((ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? [])
-          for (const s of entries) {
-            const cwd = s?.header?.cwd
-            if (typeof cwd !== 'string' || !cwd.length) continue
-            const r = routeByCwd(cwd)
-            if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
+          // ctx.sessions.list is a function that needs proper this binding
+          const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
+          if (typeof listFn === 'function') {
+            const snap = listFn.call(ctx.sessions)
+            console.log(`[remote-sidebar] assemble: list() returned ${Object.keys(snap?.byId ?? {}).length} sessions`)
+            const entries = snap?.byId ? Object.values(snap.byId) : []
+            for (const s of entries) {
+              const cwd = s?.header?.cwd
+              if (typeof cwd !== 'string' || !cwd.length) continue
+              const r = routeByCwd(cwd)
+              if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
+            }
           }
         } catch (e) {
           console.log(`[remote-sidebar] assemble: getSnapshot error: ${(e as Error).message}`)
