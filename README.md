@@ -22,6 +22,25 @@ dsh plugin --profile web add dsh-sidebar-remote
 
 移除：`dsh plugin --profile web remove dsh-sidebar-remote`
 
+## 更新
+
+本包未发布 npm，更新渠道与安装渠道一致。**更新后必须重启 dsh web**（Host 半边无热重载），并硬刷新浏览器（Ctrl+Shift+R）避免沿用旧 client bundle：
+
+```bash
+# git URL 安装者：重新解析 git 依赖到最新 main（prepare 脚本自动重建）
+cd ~/.dsh/profiles/web && pnpm update dsh-sidebar-remote
+
+# tarball / 本地路径安装者：仓库不含 tgz 产物，需自行打包新版本
+git clone https://github.com/zijun-T/dsh-sidebar-remote.git && cd dsh-sidebar-remote
+npm install && npm pack                      # 生成 dsh-sidebar-remote-<新版本>.tgz
+dsh plugin --profile web add ./dsh-sidebar-remote-<新版本>.tgz
+
+# 核对已生效版本（profile 目录下）
+grep '"version"' node_modules/dsh-sidebar-remote/package.json
+```
+
+0.2.x 之间插件 id、设置命名空间与 `cordis.patch.yml` 挂载方式均未变化，覆盖安装 + 重启即可，无需任何迁移。
+
 ## 远程语义
 
 | 功能 | 远端实现 |
