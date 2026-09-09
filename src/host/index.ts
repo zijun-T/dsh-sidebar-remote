@@ -115,118 +115,93 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // ---- sandbox:policy placeholder-path rewrite ----------------------------
   // DSH's sandbox:policy context embeds the session cwd verbatim. For remote
   // sessions that cwd is the placeholder path which leaks into the model prompt.
-  // agent/pre-step listener didn't work because it never gets called.
-  // Instead, we wrap systemPrompt.assemble directly like dsh-chinese-mode does.
+  // We MUST use registerAssembleRewriter (same as dsh-chinese-mode) so our
+  // rewriter runs in the same pipeline, after localizeContexts has translated
+  // the text to Chinese with the placeholder still embedded.
   const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
   console.log(`[remote-sidebar] systemPrompt available: ${!!sp}, has assemble: ${!!sp?.assemble}`)
-  // Debug: inspect ctx.sessions structure
-  try {
-    const sessions = ctx.sessions as unknown
-    console.log('[remote-sidebar] ctx.sessions type:', typeof sessions)
-    if (typeof sessions === 'object' && sessions !== null) {
-      const keys = Object.keys(sessions)
-      console.log('[remote-sidebar] ctx.sessions keys:', keys)
-      if ('list' in sessions) {
-        const list = (sessions as { list?: unknown }).list
-        console.log('[remote-sidebar] ctx.sessions.list type:', typeof list)
-        if (typeof list === 'function') {
-          // list is a function, call it with proper this binding
-          try {
-            const snap = list.call(sessions)
-            console.log('[remote-sidebar] list() result type:', typeof snap)
-            if (typeof snap === 'object' && snap !== null) {
-              console.log('[remote-sidebar] list() result keys:', Object.keys(snap))
-              if ('byId' in snap) {
-                const byId = (snap as { byId?: Record<string, unknown> }).byId
-                console.log('[remote-sidebar] byId type:', typeof byId)
-                if (typeof byId === 'object' && byId !== null) {
-                  console.log('[remote-sidebar] byId keys:', Object.keys(byId))
-                  for (const [id, session] of Object.entries(byId)) {
-                    const s = session as { header?: { cwd?: string } }
-                    const cwd = s?.header?.cwd
-                    console.log(`[remote-sidebar]   session ${id}: cwd=${cwd}`)
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            console.log(`[remote-sidebar] list() error: ${(e as Error).message}`)
-          }
-        } else if (typeof list === 'object' && list !== null) {
-          const listKeys = Object.keys(list)
-          console.log('[remote-sidebar] ctx.sessions.list keys:', listKeys)
-          if ('getSnapshot' in list) {
-            const snap = (list as { getSnapshot?(): unknown }).getSnapshot?.()
-            console.log('[remote-sidebar] getSnapshot() result type:', typeof snap)
-            if (typeof snap === 'object' && snap !== null) {
-              console.log('[remote-sidebar] getSnapshot() result keys:', Object.keys(snap))
-            }
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.log(`[remote-sidebar] ctx.sessions debug error: ${(e as Error).message}`)
-  }
   if (sp && typeof sp.assemble === 'function') {
-    const origAssemble = sp.assemble.bind(sp)
-    let firstCallLogged = false
-    sp.assemble = async function (...args: unknown[]) {
-      if (!firstCallLogged) {
-        console.log('[remote-sidebar] systemPrompt.assemble called for the first time')
-        firstCallLogged = true
-      }
-      const result = await origAssemble(...args)
+    // Build map of placeholder → real remoteCwd on every assemble call
+    const buildMap = (): Map<string, string> => {
+      const m = new Map<string, string>()
       try {
-        if (result === null || typeof result !== 'object') return result
-        const assembly = result as { contexts?: Array<{ name?: string; text?: string }> }
-        const ctxs = assembly?.contexts
-        if (!Array.isArray(ctxs)) return result
-        // Build map of placeholder → real remoteCwd
-        const map = new Map<string, string>()
-        try {
-          // ctx.sessions.list is a function that needs proper this binding
-          const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
-          if (typeof listFn === 'function') {
-            const snap = listFn.call(ctx.sessions)
-            console.log(`[remote-sidebar] assemble: list() returned ${Object.keys(snap?.byId ?? {}).length} sessions`)
-            const entries = snap?.byId ? Object.values(snap.byId) : []
-            for (const s of entries) {
-              const cwd = s?.header?.cwd
-              if (typeof cwd !== 'string' || !cwd.length) continue
-              const r = routeByCwd(cwd)
-              if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
-            }
+        const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
+        if (typeof listFn === 'function') {
+          const snap = listFn.call(ctx.sessions)
+          const entries = snap?.byId ? Object.values(snap.byId) : []
+          for (const s of entries) {
+            const cwd = s?.header?.cwd
+            if (typeof cwd !== 'string' || !cwd.length) continue
+            const r = routeByCwd(cwd)
+            if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
           }
-        } catch (e) {
-          console.log(`[remote-sidebar] assemble: getSnapshot error: ${(e as Error).message}`)
-        }
-        console.log(`[remote-sidebar] assemble: ${map.size} remote sessions found`)
-        if (map.size === 0) {
-          console.log('[remote-sidebar] assemble: no remote sessions found, skipping rewrite')
-          return result
-        }
-        let changed = false
-        for (const c of ctxs) {
-          if (typeof c?.text !== 'string') continue
-          let next = c.text
-          for (const [placeholder, real] of map) {
-            if (next.includes(placeholder)) {
-              next = next.split(placeholder).join(real)
-              changed = true
-            }
-          }
-          if (next !== c.text) c.text = next
-        }
-        if (changed) {
-          console.log('[remote-sidebar] assemble: replaced placeholder paths in system-prompt')
         }
       } catch (e) {
-        console.log(`[remote-sidebar] assemble rewrite error: ${(e as Error).message}`)
+        console.log(`[remote-sidebar] buildMap error: ${(e as Error).message}`)
       }
-      return result
+      return m
     }
-    console.log('[remote-sidebar] systemPrompt.assemble wrapped successfully')
+
+    const rewriter = (raw: unknown) => {
+      console.log('[remote-sidebar] rewriter called')
+      const assembly = raw as { contexts?: Array<{ name?: string; text?: string }> }
+      const ctxs = assembly?.contexts
+      if (!Array.isArray(ctxs)) {
+        console.log('[remote-sidebar] rewriter: no contexts array')
+        return
+      }
+      const map = buildMap()
+      console.log(`[remote-sidebar] rewriter: ${map.size} remote sessions found`)
+      if (map.size === 0) {
+        console.log('[remote-sidebar] rewriter: no remote sessions, skipping')
+        return
+      }
+      let changed = false
+      for (const c of ctxs) {
+        if (typeof c?.text !== 'string') continue
+        let next = c.text
+        for (const [placeholder, real] of map) {
+          if (next.includes(placeholder)) {
+            next = next.split(placeholder).join(real)
+            changed = true
+            console.log(`[remote-sidebar] rewriter: replaced "${placeholder.substring(0, 50)}..." → "${real}"`)
+          }
+        }
+        if (next !== c.text) c.text = next
+      }
+      if (changed) {
+        console.log('[remote-sidebar] rewriter: paths replaced successfully')
+      }
+    }
+
+    // Try to import assemble-patch and register via registerAssembleRewriter
+    ;(async () => {
+      let registered = false
+      try {
+        // Use absolute file URL to bypass package.json exports restriction
+        const nodeModules = '/home/worker/.dsh/profiles/web/node_modules'
+        const absPath = nodeModules + '/deepseek-harness-zh_pro/lib/assemble-patch.js'
+        // @ts-ignore — dynamic import by absolute file URL
+        const mod = await import('file://' + absPath) as { registerAssembleRewriter?: (fn: (a: unknown) => void) => () => void }
+        if (typeof mod.registerAssembleRewriter === 'function') {
+          mod.registerAssembleRewriter(rewriter)
+          registered = true
+          console.log('[remote-sidebar] sandbox:policy rewriter registered via assemble-patch')
+        }
+      } catch (e1) {
+        console.log(`[remote-sidebar] assemble-patch import failed: ${(e1 as Error).message}, falling back to direct wrap`)
+      }
+      if (!registered) {
+        // Fallback: wrap sp.assemble directly (less reliable due to ensureAssemblePatch)
+        const origAssemble = sp.assemble!.bind(sp)
+        sp.assemble = async function (...args: unknown[]) {
+          const result = await origAssemble(...args)
+          try { rewriter(result) } catch {}
+          return result
+        }
+        console.log('[remote-sidebar] systemPrompt.assemble wrapped directly (fallback)')
+      }
+    })()
   } else {
     console.log('[remote-sidebar] systemPrompt not available, cannot wrap assemble')
   }
