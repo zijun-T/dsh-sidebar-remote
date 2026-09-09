@@ -112,6 +112,64 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
 
   const fence = (req: { headers: Record<string, unknown> }) => isTrustedApiRequest(req as never, ctx.webRuntime.trustedHosts)
 
+  // ---- agent/pre-step path replacement (fallback) ----------------------------
+  // If systemPrompt.assemble rewriter doesn't work, we fallback to agent/pre-step
+  // listener to replace placeholder paths in decision.messages before they reach
+  // the model. Use prepend: true to ensure we run before dsh-chinese-mode's
+  // pre-step listener.
+  ctx.on?.('agent/pre-step', async (args: unknown, next: (a?: unknown) => Promise<unknown>) => {
+    console.log('[remote-sidebar] pre-step listener invoked')
+    const decision = await next()
+    try {
+      if (decision === null || typeof decision !== 'object') return decision
+      const entry = decision as { kind?: string; messages?: Array<{ source?: unknown; content?: Array<{ type?: string; text?: string }> }> }
+      if (entry.kind === 'reject' || !Array.isArray(entry.messages)) return decision
+      // Build map of placeholder → real remoteCwd
+      const map = new Map<string, string>()
+      try {
+        const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
+        if (typeof listFn === 'function') {
+          const snap = listFn.call(ctx.sessions)
+          const entries = snap?.byId ? Object.values(snap.byId) : []
+          for (const s of entries) {
+            const cwd = s?.header?.cwd
+            if (typeof cwd !== 'string' || !cwd.length) continue
+            const r = routeByCwd(cwd)
+            if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
+          }
+        }
+      } catch (e) {
+        console.log(`[remote-sidebar] pre-step buildMap error: ${(e as Error).message}`)
+      }
+      console.log(`[remote-sidebar] pre-step: ${map.size} remote sessions found`)
+      if (map.size === 0) return decision
+      let changed = false
+      for (const msg of entry.messages) {
+        if (!Array.isArray(msg.content)) continue
+        const newContent = msg.content.map(block => {
+          if (block.type !== 'text' || typeof block.text !== 'string') return block
+          let next = block.text
+          for (const [placeholder, real] of map) {
+            if (next.includes(placeholder)) {
+              next = next.split(placeholder).join(real)
+              changed = true
+              console.log(`[remote-sidebar] pre-step: replaced "${placeholder.substring(0, 50)}..." → "${real}"`)
+            }
+          }
+          return { ...block, text: next }
+        })
+        if (changed) msg.content = newContent
+      }
+      if (changed) {
+        console.log('[remote-sidebar] pre-step: paths replaced successfully')
+      }
+    } catch (e) {
+      console.log(`[remote-sidebar] pre-step rewrite error: ${(e as Error).message}`)
+    }
+    return decision
+  }, { prepend: true })
+  console.log('[remote-sidebar] agent/pre-step listener registered with prepend: true')
+
   // ---- sandbox:policy placeholder-path rewrite ----------------------------
   // DSH's sandbox:policy context embeds the session cwd verbatim. For remote
   // sessions that cwd is the placeholder path which leaks into the model prompt.
@@ -125,15 +183,37 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
     const buildMap = (): Map<string, string> => {
       const m = new Map<string, string>()
       try {
-        const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
-        if (typeof listFn === 'function') {
-          const snap = listFn.call(ctx.sessions)
-          const entries = snap?.byId ? Object.values(snap.byId) : []
-          for (const s of entries) {
-            const cwd = s?.header?.cwd
-            if (typeof cwd !== 'string' || !cwd.length) continue
-            const r = routeByCwd(cwd)
-            if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
+        console.log('[remote-sidebar] buildMap: inspecting ctx.sessions')
+        const sessions = ctx.sessions as unknown
+        console.log('[remote-sidebar]   ctx.sessions type:', typeof sessions)
+        if (typeof sessions === 'object' && sessions !== null) {
+          console.log('[remote-sidebar]   ctx.sessions keys:', Object.keys(sessions))
+          if ('list' in sessions) {
+            const listFn = (sessions as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
+            console.log('[remote-sidebar]   ctx.sessions.list type:', typeof listFn)
+            if (typeof listFn === 'function') {
+              const snap = listFn.call(sessions)
+              console.log('[remote-sidebar]   list() result type:', typeof snap)
+              if (typeof snap === 'object' && snap !== null) {
+                console.log('[remote-sidebar]   list() result keys:', Object.keys(snap))
+                if ('byId' in snap) {
+                  const byId = (snap as { byId?: Record<string, { header?: { cwd?: string } }> }).byId
+                  console.log('[remote-sidebar]   byId type:', typeof byId)
+                  if (typeof byId === 'object' && byId !== null) {
+                    console.log('[remote-sidebar]   byId keys:', Object.keys(byId))
+                    for (const [id, s] of Object.entries(byId)) {
+                      const cwd = (s as { header?: { cwd?: string } })?.header?.cwd
+                      console.log(`[remote-sidebar]     session ${id}: cwd=${cwd?.substring(0, 80)}...`)
+                      if (typeof cwd === 'string' && cwd.length > 0) {
+                        const r = routeByCwd(cwd)
+                        console.log(`[remote-sidebar]       route=${r.kind}${r.kind === 'remote' ? ` remoteCwd=${r.remoteCwd}` : ''}`)
+                        if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       } catch (e) {
