@@ -259,16 +259,3 @@ export function applyLiteralEdit(before: string, patch: { old_string: string; ne
   }
   return b.split(oldN).join(newN)
 }
-
-export async function remoteStat(conn: unknown, remotePath: string): Promise<{ isFile: boolean; isDir: boolean; size: number } | null> {
-  const c = conn as Parameters<typeof getFs>[0]
-  let fs: SftpLike
-  try { fs = await getFs(c) } catch { return null }
-  try {
-    const st = await fs.stat?.(remotePath)
-    if (!st) return null
-    const isDir = typeof (st as { isDirectory?: ()=>boolean }).isDirectory === 'function' ? (st as { isDirectory: ()=>boolean }).isDirectory() : st.type === 'directory'
-    const isFile = typeof (st as { isFile?: ()=>boolean }).isFile === 'function' ? (st as { isFile: ()=>boolean }).isFile() : st.type === 'file'
-    return { isDir: !!isDir, isFile: !!isFile, size: st.size ?? 0 }
-  } catch { return null }
-}

@@ -2,19 +2,17 @@
 // Aggregates dsh-better-sidebar + @dsh-ssh/dsh-ssh. Preferred path is delegation
 // to upstream where possible; remote branches use sshPool + router + policy.
 
-import { createHash } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
-import { basename, posix, isAbsolute, resolve, relative } from 'node:path'
+import { basename, posix } from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
-import { SidebarError, writeOk, writeError, writeJson, readJsonBody, requireString, isTrustedApiRequest, decodeHtmlUrl, mediaTypeForPath, messageOf } from '../shared/wire.js'
+import { SidebarError, writeOk, writeError, writeJson, readJsonBody, requireString, isTrustedApiRequest, mediaTypeForPath, messageOf } from '../shared/wire.js'
 import { routeByCwd, resolveRemotePath, remoteRoot } from '../shared/router.js'
 import { displayAddress } from '../shared/router.js'
-import { remoteListDirectory, remoteReadText, remoteWriteAtomic, applyLiteralEdit, remoteStat } from './remote-fs.js'
+import { remoteListDirectory, remoteReadText, remoteWriteAtomic, applyLiteralEdit } from './remote-fs.js'
 import { remoteRunGit, remoteIsGitRepo, remoteRepoRoots, parsePorcelainZ, parseWorktreeList, parseLogLines } from './remote-git.js'
 import { RemotePtyManager, classifyTerminalFrame, clampDims } from './remote-pty.js'
-import { isPathInsideWorkspace, mutationDenialMode, sandboxDenialError } from '@dsh-ssh/dsh-ssh/src/policy.js'
+import { mutationDenialMode, sandboxDenialError } from '@dsh-ssh/dsh-ssh/src/policy.js'
 import { SshError, shellQuoteSingle, buildRemoteCommand, SshConn as SshConnClass } from '@dsh-ssh/dsh-ssh/src/ssh-core.js'
-import { HOSTS_NAMESPACE, readHostsDoc } from '@dsh-ssh/dsh-ssh/src/settings.js'
+import { readHostsDoc } from '@dsh-ssh/dsh-ssh/src/settings.js'
 import { ExecFs } from '@dsh-ssh/dsh-ssh/src/exec-fs.js'
 import { assertCompat } from './compat.js'
 import { patchSshConnShell, ensureShellOnConn } from './ssh-shell-patch.js'
@@ -100,8 +98,6 @@ async function resolveRemoteConn(ctx: Ctx, cwd: string) {
     throw new SidebarError('fs-error', messageOf(e), 400)
   }
 }
-
-function badRoute(target: string) { throw new SidebarError('bad-request', `not a ${target} route`, 400) }
 
 function getSandboxMode(ctx: Ctx, sessionId?: string): string {
   // Try to read real sandbox mode from session or settings — never hardcode workspace-write
@@ -249,9 +245,6 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
 
   // Remote PTY manager — one instance for all remote sessions
   const remotePty = new RemotePtyManager(resolved.terminalsPerSession, resolved.reconnectGraceMs)
-  // wss: reserved for potential future local WS bridging; currently unused but retained so teardown covers both
-  // servers. If removed, ensure the teardown below is updated to only close remoteWss.
-  const wss = new WebSocketServer({ noServer: true })
   const remoteWss = new WebSocketServer({ noServer: true })
 
   // Helper: get display address without leaking placeholder encoding to UI errors
@@ -269,16 +262,6 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // Strategy: register /sidebar/remote/api + /sidebar/remote/file + /sidebar/remote/html
   // plus a status probe /sidebar/remote/address. The client wrapper (src/client)
   // decides at call time.
-
-  async function withRemote<T>(sessionId: string, cwdOverride: string | undefined, fn: (conn: unknown, remoteCwd: string, hostId: string, placeholderCwd: string) => Promise<T>): Promise<{ remote: true; value: T } | { remote: false }> {
-    const placeholderCwd = sessionCwdOf(ctx, sessionId, cwdOverride)
-    const r = routeByCwd(placeholderCwd)
-    if (r.kind !== 'remote') return { remote: false }
-    const pooled = await resolveRemoteConn(ctx, placeholderCwd)
-    if (!pooled) return { remote: false }
-    const value = await fn(pooled.conn, pooled.remoteCwd, pooled.hostId, placeholderCwd)
-    return { remote: true, value }
-  }
 
   // ---- /sidebar/remote/api -----------------------------------------------
   ctx.effect(()=>ctx.webServer.register({
@@ -563,15 +546,10 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // Cleanup
   ctx.effect(()=>()=>{
     try { remotePty.disposeAll() } catch {}
-    try { wss.close() } catch {}
     try { remoteWss.close() } catch {}
   }, 'remote-sidebar: teardown')
 
   ctx.logger?.info('[remote-sidebar] host routes mounted (/sidebar/remote/*)')
-}
-
-function poolRef(ctx: Ctx) {
-  return ctx.get?.('sshPool') as { acquire(c: unknown): Promise<unknown> } | undefined
 }
 
 async function dispatchRemote(

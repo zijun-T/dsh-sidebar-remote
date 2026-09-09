@@ -14,7 +14,7 @@ export {
 
 import path from 'node:path'
 import { posix } from 'node:path'
-import { decodeRemotePath, encodeRemotePath, isValidHostId, mapLocalToRemote, mapRemoteToLocal, routeByCwd, resolveRemotePath as resolveRemotePathUpstream } from '@dsh-ssh/dsh-ssh/src/router.js'
+import { decodeRemotePath, isValidHostId, mapLocalToRemote, resolveRemotePath as resolveRemotePathUpstream } from '@dsh-ssh/dsh-ssh/src/router.js'
 
 export type Route = { kind: 'local' } | { kind: 'remote'; hostId: string; remoteCwd: string }
 
@@ -101,17 +101,4 @@ export function remoteDisplayName(remotePath: string): string {
   const parts = text.split('/')
   while (parts.length > 1 && parts[parts.length - 1] === '') parts.pop() // drop trailing slashes
   return parts.length > 1 ? parts[parts.length - 1] : 'root'
-}
-
-/** Structured remote identity — never derived by parsing displayAddress. */
-export interface RemoteIdentity {
-  hostId: string
-  remotePath: string
-  remoteCwd: string
-}
-
-export function remoteIdentityOf(cwd: string): RemoteIdentity | null {
-  const r = routeByCwd(cwd)
-  if (r.kind !== 'remote') return null
-  return { hostId: r.hostId, remotePath: r.remoteCwd, remoteCwd: r.remoteCwd }
 }

@@ -630,9 +630,3 @@ export function routeForFile(sessionCwd: string | null, path: string): string {
   if (r.kind === 'remote') return `/sidebar/remote/file?path=${encodeURIComponent(path)}`
   return `/sidebar/file?path=${encodeURIComponent(path)}`
 }
-export function routeForHtml(sessionId: string, path: string, sessionCwd: string | null): string {
-  const { encodeHtmlUrl } = { encodeHtmlUrl: (sid:string,p:string)=> `/sidebar/html/${encodeURIComponent(sid)}/${String(p).split(/[\\/]+/).filter(s=>s!=='').map(encodeURIComponent).join('/')}` } as const
-  const url = encodeHtmlUrl(sessionId, path)
-  if (sessionCwd && routeOf(sessionCwd).kind === 'remote') return url.replace('/sidebar/html/', '/sidebar/remote/html/')
-  return url
-}
