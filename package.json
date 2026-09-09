@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-remote",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH Web 聚合插件：自动集成 dsh-better-sidebar 与 @dsh-ssh/dsh-ssh，使 SSH 远程工作区的文件、预览、传输、终端和 Git 运行在远程主机，本地工作区保持原行为。",
   "author": "zijun-T (https://github.com/zijun-T)",
   "repository": {

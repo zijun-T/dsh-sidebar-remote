@@ -48,6 +48,36 @@ function sessionCwdOf(ctx: Ctx, sessionId: string, overrideCwd?: string): string
   return s.header.cwd
 }
 
+// Host-side session enumeration for the prompt rewriters.
+// ctx.sessions.list() on the HOST returns a fresh ARRAY of live sessions
+// (dsh-session SessionStore.list: `[...store.values()].map(e => e.session)`),
+// NOT the client snapshot shape ({ byId }) that ctx.sessions.list.getSnapshot()
+// yields in the browser. Checking only for `byId` made the placeholder map
+// silently empty on every call, so the rewriters registered but never replaced
+// anything. Accept both shapes.
+function remoteCwdMapOf(ctx: Ctx): Map<string, string> {
+  const m = new Map<string, string>()
+  try {
+    const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => unknown }).list
+    if (typeof listFn !== 'function') return m
+    const snap = listFn.call(ctx.sessions)
+    const entries: unknown[] = Array.isArray(snap)
+      ? snap
+      : (snap && typeof snap === 'object' && 'byId' in snap
+          ? Object.values((snap as { byId?: Record<string, unknown> }).byId ?? {})
+          : [])
+    for (const s of entries) {
+      const cwd = (s as { header?: { cwd?: string } } | undefined)?.header?.cwd
+      if (typeof cwd !== 'string' || !cwd.length) continue
+      const r = routeByCwd(cwd)
+      if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
+    }
+  } catch (e) {
+    console.log(`[remote-sidebar] remoteCwdMap error: ${(e as Error).message}`)
+  }
+  return m
+}
+
 async function resolveRemoteConn(ctx: Ctx, cwd: string) {
   const r = routeByCwd(cwd)
   if (r.kind !== 'remote') return null
@@ -118,30 +148,12 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // the model. Use prepend: true to ensure we run before dsh-chinese-mode's
   // pre-step listener.
   ctx.on?.('agent/pre-step', async (args: unknown, next: (a?: unknown) => Promise<unknown>) => {
-    console.log('[remote-sidebar] pre-step listener invoked')
     const decision = await next()
     try {
       if (decision === null || typeof decision !== 'object') return decision
       const entry = decision as { kind?: string; messages?: Array<{ source?: unknown; content?: Array<{ type?: string; text?: string }> }> }
       if (entry.kind === 'reject' || !Array.isArray(entry.messages)) return decision
-      // Build map of placeholder → real remoteCwd
-      const map = new Map<string, string>()
-      try {
-        const listFn = (ctx.sessions as unknown as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
-        if (typeof listFn === 'function') {
-          const snap = listFn.call(ctx.sessions)
-          const entries = snap?.byId ? Object.values(snap.byId) : []
-          for (const s of entries) {
-            const cwd = s?.header?.cwd
-            if (typeof cwd !== 'string' || !cwd.length) continue
-            const r = routeByCwd(cwd)
-            if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
-          }
-        }
-      } catch (e) {
-        console.log(`[remote-sidebar] pre-step buildMap error: ${(e as Error).message}`)
-      }
-      console.log(`[remote-sidebar] pre-step: ${map.size} remote sessions found`)
+      const map = remoteCwdMapOf(ctx)
       if (map.size === 0) return decision
       let changed = false
       for (const msg of entry.messages) {
@@ -179,63 +191,12 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
   console.log(`[remote-sidebar] systemPrompt available: ${!!sp}, has assemble: ${!!sp?.assemble}`)
   if (sp && typeof sp.assemble === 'function') {
-    // Build map of placeholder → real remoteCwd on every assemble call
-    const buildMap = (): Map<string, string> => {
-      const m = new Map<string, string>()
-      try {
-        console.log('[remote-sidebar] buildMap: inspecting ctx.sessions')
-        const sessions = ctx.sessions as unknown
-        console.log('[remote-sidebar]   ctx.sessions type:', typeof sessions)
-        if (typeof sessions === 'object' && sessions !== null) {
-          console.log('[remote-sidebar]   ctx.sessions keys:', Object.keys(sessions))
-          if ('list' in sessions) {
-            const listFn = (sessions as { list?: (...args: unknown[]) => { byId?: Record<string, { header?: { cwd?: string } }> } }).list
-            console.log('[remote-sidebar]   ctx.sessions.list type:', typeof listFn)
-            if (typeof listFn === 'function') {
-              const snap = listFn.call(sessions)
-              console.log('[remote-sidebar]   list() result type:', typeof snap)
-              if (typeof snap === 'object' && snap !== null) {
-                console.log('[remote-sidebar]   list() result keys:', Object.keys(snap))
-                if ('byId' in snap) {
-                  const byId = (snap as { byId?: Record<string, { header?: { cwd?: string } }> }).byId
-                  console.log('[remote-sidebar]   byId type:', typeof byId)
-                  if (typeof byId === 'object' && byId !== null) {
-                    console.log('[remote-sidebar]   byId keys:', Object.keys(byId))
-                    for (const [id, s] of Object.entries(byId)) {
-                      const cwd = (s as { header?: { cwd?: string } })?.header?.cwd
-                      console.log(`[remote-sidebar]     session ${id}: cwd=${cwd?.substring(0, 80)}...`)
-                      if (typeof cwd === 'string' && cwd.length > 0) {
-                        const r = routeByCwd(cwd)
-                        console.log(`[remote-sidebar]       route=${r.kind}${r.kind === 'remote' ? ` remoteCwd=${r.remoteCwd}` : ''}`)
-                        if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.log(`[remote-sidebar] buildMap error: ${(e as Error).message}`)
-      }
-      return m
-    }
-
     const rewriter = (raw: unknown) => {
-      console.log('[remote-sidebar] rewriter called')
       const assembly = raw as { contexts?: Array<{ name?: string; text?: string }> }
       const ctxs = assembly?.contexts
-      if (!Array.isArray(ctxs)) {
-        console.log('[remote-sidebar] rewriter: no contexts array')
-        return
-      }
-      const map = buildMap()
-      console.log(`[remote-sidebar] rewriter: ${map.size} remote sessions found`)
-      if (map.size === 0) {
-        console.log('[remote-sidebar] rewriter: no remote sessions, skipping')
-        return
-      }
+      if (!Array.isArray(ctxs)) return
+      const map = remoteCwdMapOf(ctx)
+      if (map.size === 0) return
       let changed = false
       for (const c of ctxs) {
         if (typeof c?.text !== 'string') continue

@@ -12,7 +12,7 @@ dsh plugin --profile web add /path/to/remote-sidebar-plugin
 
 # tarball（推荐换机部署）
 npm pack
-dsh plugin --profile web add ./dsh-sidebar-remote-0.2.0.tgz
+dsh plugin --profile web add ./dsh-sidebar-remote-0.2.1.tgz
 
 # 发布后（npm）
 dsh plugin --profile web add dsh-sidebar-remote
@@ -72,16 +72,12 @@ DSH_EXPECT_ENTRY=<该目录下必然存在的名字> \
 
 详细架构设计与接口差距分析见 `docs/`。
 
-## 已知限制
+## 提示词路径改写(sandbox:policy)
 
-### sandbox:policy 占位符路径泄露
+远程会话的 cwd 是占位符路径(`<remoteRoot>/<hostId>/<base64url(remoteCwd)>`),DSH core 会把它原样嵌入模型提示词的 `sandbox:policy` context。自 0.2.1 起,插件在组装期把占位符改写回真实远程路径:
 
-远程会话的 cwd 使用占位符编码（如 `/home/worker/.dsh/remote/<session-id>/<base64url(remoteCwd)>`），该占位符会直接注入到模型提示词的 `sandbox:policy` context 中，导致模型看到不直观的路径而非真实远端路径（如 `/root/strategy`）。
+- **主路径**:经 `deepseek-harness-zh_pro` 的 `registerAssembleRewriter` 注册「assemble 返回后」改写器(与上下文中文化同流水线,运行于翻译之后);该包缺失时回退为直接包装 `systemPrompt.assemble`。
+- **兜底路径**:`agent/pre-step` 监听器(`prepend: true`)对 `decision.messages` 做同样替换。
+- 替换映射由 `remoteCwdMapOf()` 构建:host 端 `ctx.sessions.list()` 返回**活会话数组**(不是客户端 `getSnapshot()` 的 `{ byId }` 形状,两者均兼容),占位符 cwd 经 `routeByCwd()` 映射为真实 `remoteCwd`。
 
-**原因**：DSH core 在会话创建时注入 sandbox:policy，而插件加载晚于会话创建。DSH 的 agent loop 没有暴露 `systemPrompt.assemble` 或 `agent/pre-step` 事件供插件拦截，因此无法在运行时替换占位符路径。
-
-**影响**：模型提示词中显示占位符路径，可能混淆模型对文件系统的理解。
-
-**解决方案**：需要修改 DSH core 源码，在 sandbox:policy 注入时使用真实远端路径，或请求 DSH 开发者暴露相关的事件/API 供插件拦截。当前暂无插件级解决方案。
-
-**临时规避**：用户可手动配置远端路径或使用其他方式避免依赖提示词中的路径信息。
+验证:远程会话对话的上下文注入中 `sandbox:policy` 显示真实远程路径(如 `/home/ubuntu/MedFluent`),Host 日志输出 `rewriter: replaced "<占位符>" → "<真实路径>"`。

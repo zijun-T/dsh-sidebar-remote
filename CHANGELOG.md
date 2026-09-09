@@ -4,6 +4,24 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.1 - 2026-09-09
+
+### Fixed
+
+- **The `sandbox:policy` context kept leaking the placeholder cwd into the model
+  prompt.** Both prompt rewriters (the `systemPrompt.assemble` rewriter
+  registered through `deepseek-harness-zh_pro`'s `registerAssembleRewriter`, and
+  the `agent/pre-step` fallback) built their placeholder → real-path map with
+  `ctx.sessions.list()` and then checked the result for the *client* snapshot
+  shape (`snap.byId`). On the host, `dsh-session`'s `SessionStore.list()`
+  returns a fresh **array** of live sessions, so the check never matched, the
+  map was empty on every call, and both rewriters registered successfully yet
+  replaced nothing — verified live: the rewriter ran on every model request and
+  logged `0 remote sessions found`. `remoteCwdMapOf()` now accepts both shapes
+  (array and `{ byId }`) and is shared by the two interception points.
+- Removed the per-request diagnostic logging added while hunting the defect
+  above; only registration-time and actual-replacement logs remain.
+
 ## 0.2.0 - 2026-09-02
 
 First release intended to be installable from a tarball or registry on a machine
