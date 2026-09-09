@@ -38,6 +38,7 @@ type Ctx = {
   get?(name: string): unknown
   effect(fn: ()=>(()=>void)|void, label?: string): void
   on?(event: string, handler: (e: unknown)=>void): ()=>void
+  on?(event: string, handler: (args: unknown, next: (a?:unknown)=>Promise<unknown>)=>Promise<unknown>, opts?: { prepend?: boolean }): ()=>void
 }
 
 function sessionCwdOf(ctx: Ctx, sessionId: string, overrideCwd?: string): string {
@@ -94,6 +95,7 @@ function getSandboxMode(ctx: Ctx, sessionId?: string): string {
 }
 
 export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: number; uploadLimit?: number; listLimit?: number; terminalsPerSession?: number; reconnectGraceMs?: number } = {}) {
+  console.log('[remote-sidebar] apply() called')
   assertCompat(ctx)
   // F-00: ensure pooled SshConn gains shell() even though upstream 0.1.3 ships without it.
   // This covers our own copy; resolveRemoteConn additionally patches whatever
@@ -112,107 +114,65 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
 
   // ---- sandbox:policy placeholder-path rewrite ----------------------------
   // DSH's sandbox:policy context embeds the session cwd verbatim. For remote
-  // sessions that cwd is the placeholder path
-  //   <remoteRoot>/<hostId>/<base64url(remoteCwd)>
-  // which leaks into the model prompt as the "workspace" — confusing the agent
-  // (it sees an opaque encoded tail instead of the real remote path like
-  // /root/strategy). Register an assemble rewriter that swaps every known
-  // placeholder for its real remoteCwd in all context texts.
-  // Use ctx.get() like dsh-chinese-mode does — the inject-list approach is
-  // unreliable for services that are registered lazily.
-  const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
-  if (sp && typeof sp.assemble === 'function') {
-    // Build placeholder → real remoteCwd map on every assemble call so that
-    // sessions created after plugin load are also covered.
-    const buildMap = (): Map<string, string> => {
-      const m = new Map<string, string>()
+  // sessions that cwd is the placeholder path which leaks into the model prompt.
+  // We cannot reliably hook into systemPrompt.assemble because dsh-chinese-mode's
+  // ensureAssemblePatch replaces the prototype method after our plugin loads.
+  // Instead, we intercept agent/pre-step decision and replace paths in injected
+  // messages (specifically the @deepseek-ai/dsh-system-prompt source).
+  const disposer = ctx.on?.('agent/pre-step', async (args: unknown, next: (a?:unknown)=>Promise<unknown>) => {
+    console.log('[remote-sidebar] pre-step listener invoked')
+    const decision = await next()
+    try {
+      if (decision === null || typeof decision !== 'object') return decision
+      const entry = decision as { kind?: string; messages?: Array<{ source?: unknown; content?: Array<{ type?: string; text?: string }> }> }
+      if (entry.kind === 'reject' || !Array.isArray(entry.messages)) return decision
+      // Build map of placeholder → real remoteCwd
+      const map = new Map<string, string>()
       try {
-        const allSessions = (ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? []
-        for (const s of allSessions) {
+        const snap = (ctx.sessions as unknown as { list?: { getSnapshot?(): { byId?: Record<string, { header?: { cwd?: string } }> }; all?(): Array<{ header?: { cwd?: string } }> } }).list?.getSnapshot?.()
+        const entries = snap?.byId ? Object.values(snap.byId) : ((ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? [])
+        for (const s of entries) {
           const cwd = s?.header?.cwd
           if (typeof cwd !== 'string' || !cwd.length) continue
           const r = routeByCwd(cwd)
-          if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
+          if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
         }
       } catch {}
-      return m
-    }
-    const rewriter = (raw: unknown) => {
-      const assembly = raw as { contexts?: Array<{ name?: string; text?: string }> }
-      const ctxs = assembly?.contexts
-      if (!Array.isArray(ctxs)) return
-      const map = buildMap()
+      console.log(`[remote-sidebar] pre-step: ${map.size} remote sessions found`)
       if (map.size === 0) {
-        // Debug: log session info to diagnose why map is empty
-        try {
-          const allSessions = (ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? []
-          console.log(`[remote-sidebar] rewriter: ${allSessions.length} sessions, map empty`)
-          for (const s of allSessions) {
-            const cwd = s?.header?.cwd ?? '(no cwd)'
-            const r = routeByCwd(cwd)
-            console.log(`[remote-sidebar]   session cwd=${cwd} route=${r.kind}${r.kind === 'remote' ? ` remoteCwd=${r.remoteCwd}` : ''}`)
+        console.log('[remote-sidebar] pre-step: no remote sessions found, skipping rewrite')
+        return decision
+      }
+      let changed = false
+      const messages = entry.messages.map(msg => {
+        // Only touch system-prompt injections (sandbox:policy lives there)
+        const src = msg.source as { plugin?: string; kind?: string } | undefined
+        if (!src || (src.plugin !== '@deepseek-ai/dsh-system-prompt' && src.kind !== 'plugin')) return msg
+        if (!Array.isArray(msg.content)) return msg
+        const newContent = msg.content.map(block => {
+          if (block.type !== 'text' || typeof block.text !== 'string') return block
+          let next = block.text
+          for (const [placeholder, real] of map) {
+            if (next.includes(placeholder)) {
+              next = next.split(placeholder).join(real)
+              changed = true
+            }
           }
-        } catch (e) { console.log(`[remote-sidebar] rewriter debug error: ${(e as Error).message}`) }
-        return
+          return { ...block, text: next }
+        })
+        return { ...msg, content: newContent }
+      })
+      if (changed) {
+        console.log('[remote-sidebar] pre-step: replaced placeholder paths in system-prompt')
+        return { ...entry, messages }
       }
-      console.log(`[remote-sidebar] rewriter: map has ${map.size} entries`)
-      for (const c of ctxs) {
-        if (typeof c?.text !== 'string') continue
-        let next = c.text
-        for (const [placeholder, real] of map) {
-          if (next.includes(placeholder)) next = next.split(placeholder).join(real)
-        }
-        if (next !== c.text) {
-          c.text = next
-          console.log(`[remote-sidebar] replaced path in context "${c.name}"`)
-        }
-      }
+      return decision
+    } catch (e) {
+      console.log(`[remote-sidebar] pre-step error: ${(e as Error).message}`)
+      return decision
     }
-    // registerAssembleRewriter lives in the shared assemble-patch module
-    // that dsh-chinese-mode also uses. We MUST use it rather than wrapping
-    // sp.assemble directly, because ensureAssemblePatch() resolves the base
-    // via Object.getPrototypeOf(candidate).assemble — any instance-level wrap
-    // is silently bypassed. Import by absolute file path to sidestep the
-    // package.json "exports" restriction that blocks bare-specifier imports.
-    ;(async () => {
-      let registered = false
-      try {
-        // Build absolute path to bypass package.json "exports" restriction.
-        // require.resolve is unavailable in ESM; construct the path manually.
-        const base = (ctx as unknown as { get?(n:string):unknown }).get?.('webRuntime')
-        void base
-        const nodeModules = '/home/worker/.dsh/profiles/web/node_modules'
-        const absPath = nodeModules + '/deepseek-harness-zh_pro/lib/assemble-patch.js'
-        // @ts-ignore — dynamic import by absolute file URL
-        const mod = await import('file://' + absPath) as { registerAssembleRewriter?: (fn: (a: unknown) => void) => () => void }
-        if (typeof mod.registerAssembleRewriter === 'function') {
-          mod.registerAssembleRewriter(rewriter)
-          registered = true
-          console.log('[remote-sidebar] sandbox:policy rewriter registered via assemble-patch')
-        }
-      } catch (e1) {
-        console.log(`[remote-sidebar] assemble-patch import failed: ${(e1 as Error).message}`)
-      }
-      if (!registered) {
-        // Last resort: wrap the prototype method so even ensureAssemblePatch's
-        // proto.assemble lookup picks up our wrapper.
-        const proto = Object.getPrototypeOf(sp)
-        if (proto && typeof proto.assemble === 'function') {
-          const origProto = proto.assemble
-          proto.assemble = async function (this: unknown, ...args: unknown[]) {
-            const result = await origProto.apply(this, args)
-            try { rewriter(result) } catch {}
-            return result
-          }
-          console.log('[remote-sidebar] sandbox:policy rewriter registered via prototype wrap')
-        } else {
-          console.log('[remote-sidebar] WARNING: no prototype assemble found, rewrite disabled')
-        }
-      }
-    })()
-  } else {
-    console.log('[remote-sidebar] systemPrompt service not available — sandbox:policy rewrite disabled')
-  }
+  }, { prepend: true })
+  console.log(`[remote-sidebar] agent/pre-step listener registered, disposer: ${!!disposer}`)
 
   // Remote PTY manager — one instance for all remote sessions
   const remotePty = new RemotePtyManager(resolved.terminalsPerSession, resolved.reconnectGraceMs)
