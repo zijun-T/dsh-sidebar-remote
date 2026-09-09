@@ -26,7 +26,7 @@ import { patchSshConnShell, ensureShellOnConn } from './ssh-shell-patch.js'
 // bundle URL. Was `@remote/sidebar-remote` until the 0.2.0 rename; neither name
 // has ever been published, so no installed deployment carries the old id.
 export const name = 'dsh-sidebar-remote'
-export const inject = ['webServer', 'sessions', 'webRuntime', 'settings', 'systemPrompt']
+export const inject = ['webServer', 'sessions', 'webRuntime', 'settings']
 
 type Ctx = {
   logger?: { info(s:string):void; warn(s:string|Error):void; error(s:string|Error):void }
@@ -118,7 +118,9 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // (it sees an opaque encoded tail instead of the real remote path like
   // /root/strategy). Register an assemble rewriter that swaps every known
   // placeholder for its real remoteCwd in all context texts.
-  const sp = ctx.systemPrompt
+  // Use ctx.get() like dsh-chinese-mode does — the inject-list approach is
+  // unreliable for services that are registered lazily.
+  const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
   if (sp && typeof sp.assemble === 'function') {
     // Build placeholder → real remoteCwd map on every assemble call so that
     // sessions created after plugin load are also covered.
@@ -140,38 +142,76 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
       const ctxs = assembly?.contexts
       if (!Array.isArray(ctxs)) return
       const map = buildMap()
-      if (map.size === 0) return
+      if (map.size === 0) {
+        // Debug: log session info to diagnose why map is empty
+        try {
+          const allSessions = (ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? []
+          console.log(`[remote-sidebar] rewriter: ${allSessions.length} sessions, map empty`)
+          for (const s of allSessions) {
+            const cwd = s?.header?.cwd ?? '(no cwd)'
+            const r = routeByCwd(cwd)
+            console.log(`[remote-sidebar]   session cwd=${cwd} route=${r.kind}${r.kind === 'remote' ? ` remoteCwd=${r.remoteCwd}` : ''}`)
+          }
+        } catch (e) { console.log(`[remote-sidebar] rewriter debug error: ${(e as Error).message}`) }
+        return
+      }
+      console.log(`[remote-sidebar] rewriter: map has ${map.size} entries`)
       for (const c of ctxs) {
         if (typeof c?.text !== 'string') continue
         let next = c.text
         for (const [placeholder, real] of map) {
           if (next.includes(placeholder)) next = next.split(placeholder).join(real)
         }
-        if (next !== c.text) c.text = next
+        if (next !== c.text) {
+          c.text = next
+          console.log(`[remote-sidebar] replaced path in context "${c.name}"`)
+        }
       }
     }
     // registerAssembleRewriter lives in the shared assemble-patch module
-    // that dsh-chinese-mode also uses. Dynamic-import so we don't hard-
-    // depend on that plugin being installed.
+    // that dsh-chinese-mode also uses. We MUST use it rather than wrapping
+    // sp.assemble directly, because ensureAssemblePatch() resolves the base
+    // via Object.getPrototypeOf(candidate).assemble — any instance-level wrap
+    // is silently bypassed. Import by absolute file path to sidestep the
+    // package.json "exports" restriction that blocks bare-specifier imports.
     ;(async () => {
+      let registered = false
       try {
-        // @ts-ignore — runtime-only dep on dsh-chinese-mode's internals
-        const mod = await import('deepseek-harness-zh_pro/lib/assemble-patch.js') as { registerAssembleRewriter?: (fn: (a: unknown) => void) => () => void }
+        // Build absolute path to bypass package.json "exports" restriction.
+        // require.resolve is unavailable in ESM; construct the path manually.
+        const base = (ctx as unknown as { get?(n:string):unknown }).get?.('webRuntime')
+        void base
+        const nodeModules = '/home/worker/.dsh/profiles/web/node_modules'
+        const absPath = nodeModules + '/deepseek-harness-zh_pro/lib/assemble-patch.js'
+        // @ts-ignore — dynamic import by absolute file URL
+        const mod = await import('file://' + absPath) as { registerAssembleRewriter?: (fn: (a: unknown) => void) => () => void }
         if (typeof mod.registerAssembleRewriter === 'function') {
           mod.registerAssembleRewriter(rewriter)
-          ctx.logger?.info?.('[remote-sidebar] sandbox:policy placeholder-path rewriter registered (via assemble-patch)')
+          registered = true
+          console.log('[remote-sidebar] sandbox:policy rewriter registered via assemble-patch')
         }
-      } catch {
-        // dsh-chinese-mode not installed — fall back to direct assemble wrap
-        const orig = sp.assemble!.bind(sp)
-        sp.assemble = async (...args: unknown[]) => {
-          const result = await orig(...args)
-          try { rewriter(result) } catch {}
-          return result
+      } catch (e1) {
+        console.log(`[remote-sidebar] assemble-patch import failed: ${(e1 as Error).message}`)
+      }
+      if (!registered) {
+        // Last resort: wrap the prototype method so even ensureAssemblePatch's
+        // proto.assemble lookup picks up our wrapper.
+        const proto = Object.getPrototypeOf(sp)
+        if (proto && typeof proto.assemble === 'function') {
+          const origProto = proto.assemble
+          proto.assemble = async function (this: unknown, ...args: unknown[]) {
+            const result = await origProto.apply(this, args)
+            try { rewriter(result) } catch {}
+            return result
+          }
+          console.log('[remote-sidebar] sandbox:policy rewriter registered via prototype wrap')
+        } else {
+          console.log('[remote-sidebar] WARNING: no prototype assemble found, rewrite disabled')
         }
-        ctx.logger?.info?.('[remote-sidebar] sandbox:policy placeholder-path rewriter registered (direct wrap)')
       }
     })()
+  } else {
+    console.log('[remote-sidebar] systemPrompt service not available — sandbox:policy rewrite disabled')
   }
 
   // Remote PTY manager — one instance for all remote sessions
