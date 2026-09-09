@@ -26,7 +26,7 @@ import { patchSshConnShell, ensureShellOnConn } from './ssh-shell-patch.js'
 // bundle URL. Was `@remote/sidebar-remote` until the 0.2.0 rename; neither name
 // has ever been published, so no installed deployment carries the old id.
 export const name = 'dsh-sidebar-remote'
-export const inject = ['webServer', 'sessions', 'webRuntime', 'settings']
+export const inject = ['webServer', 'sessions', 'webRuntime', 'settings', 'systemPrompt']
 
 type Ctx = {
   logger?: { info(s:string):void; warn(s:string|Error):void; error(s:string|Error):void }
@@ -34,6 +34,7 @@ type Ctx = {
   webRuntime: { trustedHosts: string[] }
   sessions: { get(id: string): { header: { cwd: string } } | undefined; all?(): unknown[] }
   settings: { get(ns: string): unknown; register?(ns: string, schema: unknown, opts: unknown): unknown }
+  systemPrompt?: { assemble?(...args: unknown[]): Promise<unknown>; [k:string]: unknown }
   get?(name: string): unknown
   effect(fn: ()=>(()=>void)|void, label?: string): void
   on?(event: string, handler: (e: unknown)=>void): ()=>void
@@ -108,6 +109,70 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   }
 
   const fence = (req: { headers: Record<string, unknown> }) => isTrustedApiRequest(req as never, ctx.webRuntime.trustedHosts)
+
+  // ---- sandbox:policy placeholder-path rewrite ----------------------------
+  // DSH's sandbox:policy context embeds the session cwd verbatim. For remote
+  // sessions that cwd is the placeholder path
+  //   <remoteRoot>/<hostId>/<base64url(remoteCwd)>
+  // which leaks into the model prompt as the "workspace" — confusing the agent
+  // (it sees an opaque encoded tail instead of the real remote path like
+  // /root/strategy). Register an assemble rewriter that swaps every known
+  // placeholder for its real remoteCwd in all context texts.
+  const sp = ctx.systemPrompt
+  if (sp && typeof sp.assemble === 'function') {
+    // Build placeholder → real remoteCwd map on every assemble call so that
+    // sessions created after plugin load are also covered.
+    const buildMap = (): Map<string, string> => {
+      const m = new Map<string, string>()
+      try {
+        const allSessions = (ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? []
+        for (const s of allSessions) {
+          const cwd = s?.header?.cwd
+          if (typeof cwd !== 'string' || !cwd.length) continue
+          const r = routeByCwd(cwd)
+          if (r.kind === 'remote') m.set(cwd, r.remoteCwd)
+        }
+      } catch {}
+      return m
+    }
+    const rewriter = (raw: unknown) => {
+      const assembly = raw as { contexts?: Array<{ name?: string; text?: string }> }
+      const ctxs = assembly?.contexts
+      if (!Array.isArray(ctxs)) return
+      const map = buildMap()
+      if (map.size === 0) return
+      for (const c of ctxs) {
+        if (typeof c?.text !== 'string') continue
+        let next = c.text
+        for (const [placeholder, real] of map) {
+          if (next.includes(placeholder)) next = next.split(placeholder).join(real)
+        }
+        if (next !== c.text) c.text = next
+      }
+    }
+    // registerAssembleRewriter lives in the shared assemble-patch module
+    // that dsh-chinese-mode also uses. Dynamic-import so we don't hard-
+    // depend on that plugin being installed.
+    ;(async () => {
+      try {
+        // @ts-ignore — runtime-only dep on dsh-chinese-mode's internals
+        const mod = await import('deepseek-harness-zh_pro/lib/assemble-patch.js') as { registerAssembleRewriter?: (fn: (a: unknown) => void) => () => void }
+        if (typeof mod.registerAssembleRewriter === 'function') {
+          mod.registerAssembleRewriter(rewriter)
+          ctx.logger?.info?.('[remote-sidebar] sandbox:policy placeholder-path rewriter registered (via assemble-patch)')
+        }
+      } catch {
+        // dsh-chinese-mode not installed — fall back to direct assemble wrap
+        const orig = sp.assemble!.bind(sp)
+        sp.assemble = async (...args: unknown[]) => {
+          const result = await orig(...args)
+          try { rewriter(result) } catch {}
+          return result
+        }
+        ctx.logger?.info?.('[remote-sidebar] sandbox:policy placeholder-path rewriter registered (direct wrap)')
+      }
+    })()
+  }
 
   // Remote PTY manager — one instance for all remote sessions
   const remotePty = new RemotePtyManager(resolved.terminalsPerSession, resolved.reconnectGraceMs)
