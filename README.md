@@ -71,3 +71,17 @@ DSH_EXPECT_ENTRY=<该目录下必然存在的名字> \
 | Node | `>=22` |
 
 详细架构设计与接口差距分析见 `docs/`。
+
+## 已知限制
+
+### sandbox:policy 占位符路径泄露
+
+远程会话的 cwd 使用占位符编码（如 `/home/worker/.dsh/remote/<session-id>/<base64url(remoteCwd)>`），该占位符会直接注入到模型提示词的 `sandbox:policy` context 中，导致模型看到不直观的路径而非真实远端路径（如 `/root/strategy`）。
+
+**原因**：DSH core 在会话创建时注入 sandbox:policy，而插件加载晚于会话创建。DSH 的 agent loop 没有暴露 `systemPrompt.assemble` 或 `agent/pre-step` 事件供插件拦截，因此无法在运行时替换占位符路径。
+
+**影响**：模型提示词中显示占位符路径，可能混淆模型对文件系统的理解。
+
+**解决方案**：需要修改 DSH core 源码，在 sandbox:policy 注入时使用真实远端路径，或请求 DSH 开发者暴露相关的事件/API 供插件拦截。当前暂无插件级解决方案。
+
+**临时规避**：用户可手动配置远端路径或使用其他方式避免依赖提示词中的路径信息。
