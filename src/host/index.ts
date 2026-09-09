@@ -115,64 +115,68 @@ export function apply(ctx: Ctx, config: { readLimit?: number; mediaLimit?: numbe
   // ---- sandbox:policy placeholder-path rewrite ----------------------------
   // DSH's sandbox:policy context embeds the session cwd verbatim. For remote
   // sessions that cwd is the placeholder path which leaks into the model prompt.
-  // We cannot reliably hook into systemPrompt.assemble because dsh-chinese-mode's
-  // ensureAssemblePatch replaces the prototype method after our plugin loads.
-  // Instead, we intercept agent/pre-step decision and replace paths in injected
-  // messages (specifically the @deepseek-ai/dsh-system-prompt source).
-  const disposer = ctx.on?.('agent/pre-step', async (args: unknown, next: (a?:unknown)=>Promise<unknown>) => {
-    console.log('[remote-sidebar] pre-step listener invoked')
-    const decision = await next()
-    try {
-      if (decision === null || typeof decision !== 'object') return decision
-      const entry = decision as { kind?: string; messages?: Array<{ source?: unknown; content?: Array<{ type?: string; text?: string }> }> }
-      if (entry.kind === 'reject' || !Array.isArray(entry.messages)) return decision
-      // Build map of placeholder → real remoteCwd
-      const map = new Map<string, string>()
-      try {
-        const snap = (ctx.sessions as unknown as { list?: { getSnapshot?(): { byId?: Record<string, { header?: { cwd?: string } }> }; all?(): Array<{ header?: { cwd?: string } }> } }).list?.getSnapshot?.()
-        const entries = snap?.byId ? Object.values(snap.byId) : ((ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? [])
-        for (const s of entries) {
-          const cwd = s?.header?.cwd
-          if (typeof cwd !== 'string' || !cwd.length) continue
-          const r = routeByCwd(cwd)
-          if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
-        }
-      } catch {}
-      console.log(`[remote-sidebar] pre-step: ${map.size} remote sessions found`)
-      if (map.size === 0) {
-        console.log('[remote-sidebar] pre-step: no remote sessions found, skipping rewrite')
-        return decision
+  // agent/pre-step listener didn't work because it never gets called.
+  // Instead, we wrap systemPrompt.assemble directly like dsh-chinese-mode does.
+  const sp = (ctx.get?.('systemPrompt') ?? ctx.systemPrompt) as { assemble?(...a: unknown[]): Promise<unknown> } | undefined
+  console.log(`[remote-sidebar] systemPrompt available: ${!!sp}, has assemble: ${!!sp?.assemble}`)
+  if (sp && typeof sp.assemble === 'function') {
+    const origAssemble = sp.assemble.bind(sp)
+    let firstCallLogged = false
+    sp.assemble = async function (...args: unknown[]) {
+      if (!firstCallLogged) {
+        console.log('[remote-sidebar] systemPrompt.assemble called for the first time')
+        firstCallLogged = true
       }
-      let changed = false
-      const messages = entry.messages.map(msg => {
-        // Only touch system-prompt injections (sandbox:policy lives there)
-        const src = msg.source as { plugin?: string; kind?: string } | undefined
-        if (!src || (src.plugin !== '@deepseek-ai/dsh-system-prompt' && src.kind !== 'plugin')) return msg
-        if (!Array.isArray(msg.content)) return msg
-        const newContent = msg.content.map(block => {
-          if (block.type !== 'text' || typeof block.text !== 'string') return block
-          let next = block.text
+      const result = await origAssemble(...args)
+      try {
+        if (result === null || typeof result !== 'object') return result
+        const assembly = result as { contexts?: Array<{ name?: string; text?: string }> }
+        const ctxs = assembly?.contexts
+        if (!Array.isArray(ctxs)) return result
+        // Build map of placeholder → real remoteCwd
+        const map = new Map<string, string>()
+        try {
+          const snap = (ctx.sessions as unknown as { list?: { getSnapshot?(): { byId?: Record<string, { header?: { cwd?: string } }> }; all?(): Array<{ header?: { cwd?: string } }> } }).list?.getSnapshot?.()
+          console.log(`[remote-sidebar] assemble: getSnapshot() returned:`, JSON.stringify({ hasById: !!snap?.byId, byIdKeys: Object.keys(snap?.byId ?? {}) }))
+          const entries = snap?.byId ? Object.values(snap.byId) : ((ctx.sessions as unknown as { all?(): Array<{ header?: { cwd?: string } }> }).all?.() ?? [])
+          for (const s of entries) {
+            const cwd = s?.header?.cwd
+            if (typeof cwd !== 'string' || !cwd.length) continue
+            const r = routeByCwd(cwd)
+            if (r.kind === 'remote') map.set(cwd, r.remoteCwd)
+          }
+        } catch (e) {
+          console.log(`[remote-sidebar] assemble: getSnapshot error: ${(e as Error).message}`)
+        }
+        console.log(`[remote-sidebar] assemble: ${map.size} remote sessions found`)
+        if (map.size === 0) {
+          console.log('[remote-sidebar] assemble: no remote sessions found, skipping rewrite')
+          return result
+        }
+        let changed = false
+        for (const c of ctxs) {
+          if (typeof c?.text !== 'string') continue
+          let next = c.text
           for (const [placeholder, real] of map) {
             if (next.includes(placeholder)) {
               next = next.split(placeholder).join(real)
               changed = true
             }
           }
-          return { ...block, text: next }
-        })
-        return { ...msg, content: newContent }
-      })
-      if (changed) {
-        console.log('[remote-sidebar] pre-step: replaced placeholder paths in system-prompt')
-        return { ...entry, messages }
+          if (next !== c.text) c.text = next
+        }
+        if (changed) {
+          console.log('[remote-sidebar] assemble: replaced placeholder paths in system-prompt')
+        }
+      } catch (e) {
+        console.log(`[remote-sidebar] assemble rewrite error: ${(e as Error).message}`)
       }
-      return decision
-    } catch (e) {
-      console.log(`[remote-sidebar] pre-step error: ${(e as Error).message}`)
-      return decision
+      return result
     }
-  }, { prepend: true })
-  console.log(`[remote-sidebar] agent/pre-step listener registered, disposer: ${!!disposer}`)
+    console.log('[remote-sidebar] systemPrompt.assemble wrapped successfully')
+  } else {
+    console.log('[remote-sidebar] systemPrompt not available, cannot wrap assemble')
+  }
 
   // Remote PTY manager — one instance for all remote sessions
   const remotePty = new RemotePtyManager(resolved.terminalsPerSession, resolved.reconnectGraceMs)
